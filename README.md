@@ -49,7 +49,7 @@ L'exécutable attend trois paramètres :
 
 Exemple :
 
-    mpiexec -n 2 ./vortexSimulation data/simpleSimulation.dat 1280 1024
+    mpiexec -n 2 ./vortexSimulation.exe data/simpleSimulation.dat 1280 1024
 
 Plusieurs fichiers décrivant diverses simulations sont donnés dans le répertoire **data** :
 

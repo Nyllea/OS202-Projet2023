@@ -93,36 +93,51 @@ auto readConfigFile(std::ifstream &input)
 int main(int nargs, char *argv[])
 {
     int rank, nbp;
-    MPI_Comm globCom;
+    MPI_Comm globCom, calcComm;
 
     MPI_Init(&nargs, &argv);
     MPI_Comm_dup(MPI_COMM_WORLD, &globCom);
     MPI_Comm_size(globCom, &nbp);
     MPI_Comm_rank(globCom, &rank);
 
-    char const *filename;
-    if (nargs == 1)
+    // Initialisation du communicator de calcul
+    if (rank != 0)
+        MPI_Comm_split(globCom, 0, rank, &calcComm);
+
+    // Processus graphique
+    if (rank == 0)
     {
-        std::cout << "Usage : vortexsimulator <nom fichier configuration>" << std::endl;
-        return EXIT_FAILURE;
+        std::size_t resx = 800, resy = 600;
+        if (nargs > 3)
+        {
+            resx = std::stoull(argv[2]);
+            resy = std::stoull(argv[3]);
+        }
     }
-
-    filename = argv[1];
-    std::ifstream fich(filename);
-    auto config = readConfigFile(fich);
-    fich.close();
-
-    std::size_t resx = 800, resy = 600;
-    if (nargs > 3)
+    else // Processus de calcul
     {
-        resx = std::stoull(argv[2]);
-        resy = std::stoull(argv[3]);
-    }
+        if (rank == 1)
+        {
+            char const *filename;
+            if (nargs == 1)
+            {
+                std::cout << "Usage : vortexsimulator <nom fichier configuration>" << std::endl;
+                return EXIT_FAILURE;
+            }
 
-    auto vortices = std::get<0>(config);
-    auto isMobile = std::get<1>(config);
-    auto grid = std::get<2>(config);
-    auto cloud = std::get<3>(config);
+            filename = argv[1];
+            std::ifstream fich(filename);
+            auto config = readConfigFile(fich);
+            fich.close();
+
+            auto vortices = std::get<0>(config);
+            auto isMobile = std::get<1>(config);
+            auto grid = std::get<2>(config);
+            auto cloud = std::get<3>(config);
+        }
+
+        MPI_Bcast(&config, 1, )
+    }
 
     std::cout << "######## Vortex simultor ########" << std::endl
               << std::endl;
