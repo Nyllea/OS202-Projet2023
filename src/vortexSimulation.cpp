@@ -13,6 +13,8 @@
 #include "runge_kutta.hpp"
 #include "screen.hpp"
 
+#include <mpi.h>
+
 auto readConfigFile(std::ifstream &input)
 {
     using point = Simulation::Vortices::point;
@@ -90,6 +92,14 @@ auto readConfigFile(std::ifstream &input)
 
 int main(int nargs, char *argv[])
 {
+    int rank, nbp;
+    MPI_Comm globCom;
+
+    MPI_Init(&nargs, &argv);
+    MPI_Comm_dup(MPI_COMM_WORLD, &globCom);
+    MPI_Comm_size(globCom, &nbp);
+    MPI_Comm_rank(globCom, &rank);
+
     char const *filename;
     if (nargs == 1)
     {
@@ -177,6 +187,8 @@ int main(int nargs, char *argv[])
         myScreen.drawText(str_fps, Geometry::Point<double>{300, double(myScreen.getGeometry().second - 96)});
         myScreen.display();
     }
+
+    MPI_Finalize();
 
     return EXIT_SUCCESS;
 }
