@@ -18,12 +18,19 @@
 
 #define CONFIG_TYPE std::tuple<Simulation::Vortices, int, Numeric::CartesianGridOfSpeed, Geometry::CloudOfPoints>
 
+// Structure pour envoyer une configuration entière
 struct SendConfig
 {
     Simulation::Vortices vortices;
     int isMobile;
     Numeric::CartesianGridOfSpeed cartesianGrid;
     Geometry::CloudOfPoints cloud;
+};
+
+// Structure pour envoyer les data nécessaires à la création des datatypes de MPI
+struct SendDatatype
+{
+    std::size_t vorticesContainerSize, gridContainerSize, cloudContainerSize;
 };
 
 auto readConfigFile(std::ifstream &input)
@@ -156,7 +163,8 @@ MPI_Datatype create_cartesian_grid_of_speed_datatype(MPI_Datatype cartesianConta
     int count = 6;
 
     int block_lengths[count] = {1, 1, 1, 1, 1, 1};
-    MPI_Aint displacements[count] = {*Numeric::CartesianGridOfSpeed::get_offsets()};
+    long *tempOffsets = Numeric::CartesianGridOfSpeed::get_offsets();
+    MPI_Aint displacements[count] = {*tempOffsets};
     MPI_Datatype types[count] = {MPI_UNSIGNED_LONG, MPI_UNSIGNED_LONG, MPI_DOUBLE, MPI_DOUBLE, MPI_DOUBLE, cartesianContainer_DT};
 
     MPI_Datatype cartesian_DT;
@@ -164,7 +172,7 @@ MPI_Datatype create_cartesian_grid_of_speed_datatype(MPI_Datatype cartesianConta
     MPI_Type_create_resized(cartesian_DT, 0, sizeof(Numeric::CartesianGridOfSpeed), &cartesian_DT);
     MPI_Type_commit(&cartesian_DT);
 
-    free(displacements);
+    free(tempOffsets);
 
     return cartesian_DT;
 }
@@ -224,6 +232,22 @@ MPI_Datatype create_config_datatype(MPI_Datatype vortices_DT, MPI_Datatype carte
     return config_DT;
 }
 
+MPI_Datatype create_sendDataType_datatype()
+{
+    int count = 3;
+
+    int block_lengths[count] = {1, 1, 1};
+    MPI_Aint displacements[count] = {offsetof(SendDatatype, vorticesContainerSize), offsetof(SendDatatype, gridContainerSize), offsetof(SendDatatype, cloudContainerSize)};
+    MPI_Datatype types[count] = {MPI_UNSIGNED_LONG, MPI_UNSIGNED_LONG, MPI_UNSIGNED_LONG};
+
+    MPI_Datatype sendDataType_DT;
+    MPI_Type_create_struct(count, block_lengths, displacements, types, &sendDataType_DT);
+    MPI_Type_create_resized(sendDataType_DT, 0, sizeof(SendDatatype), &sendDataType_DT);
+    MPI_Type_commit(&sendDataType_DT);
+
+    return sendDataType_DT;
+}
+
 int main(int nargs, char *argv[])
 {
     int rank, calcRank, nbp;
@@ -240,10 +264,38 @@ int main(int nargs, char *argv[])
 
     MPI_Comm_rank(calcComm, &calcRank);
 
+    /* MPI Datatypes definitions */
+    // Vortices MPI datatype
+    MPI_Datatype geomVect_DT;
+    MPI_Datatype vorticesContainer_DT, vortices_DT;
+
+    // Cartesian grid of speed MPI datatype
+    MPI_Datatype cartesianContainer_DT, cartesianGrid_DT;
+
+    // Cloud of points MPI datatype
+    MPI_Datatype cloudPoint_DT;
+    MPI_Datatype cloudContainer_DT, cloud_DT;
+
+    // Final config datatype (tuple)
+    MPI_Datatype config_DT;
+
+    // Variables nécessaire à l'envoi des données pour construire les autres datatypes
+    SendDatatype sentTypeData;
+    MPI_Datatype sendDataType_DT = create_sendDataType_datatype();
+
+    // Variables de la simulation
+    Simulation::Vortices vortices;
+    int isMobile;
+    Numeric::CartesianGridOfSpeed grid;
+    Geometry::CloudOfPoints cloud;
+    CONFIG_TYPE config;
+
+    // Variables pour l'affichage
+    std::size_t resx = 800, resy = 600;
+
     // Processus graphique
     if (rank == 0)
     {
-        std::size_t resx = 800, resy = 600;
         if (nargs > 3)
         {
             resx = std::stoull(argv[2]);
@@ -257,119 +309,147 @@ int main(int nargs, char *argv[])
         std::cout << "Press right cursor to advance step by step in time" << std::endl;
         std::cout << "Press down cursor to halve the time step" << std::endl;
         std::cout << "Press up cursor to double the time step" << std::endl;
+    }
+    else if (rank == 1) // Processus de calcul qui récupère les données nécessaires dans le fichier
+    {
+        char const *filename;
+        if (nargs == 1)
+        {
+            std::cout << "Usage : vortexsimulator <nom fichier configuration>" << std::endl;
+            return EXIT_FAILURE;
+        }
+
+        filename = argv[1];
+        std::ifstream fich(filename);
+        config = readConfigFile(fich);
+        fich.close();
+
+        vortices = std::get<0>(config);
+        isMobile = std::get<1>(config);
+        grid = std::get<2>(config);
+        cloud = std::get<3>(config);
+
+        // Données à envoyer pour construire les Datatype
+        sentTypeData.vorticesContainerSize = vortices.get_container_size();
+        sentTypeData.gridContainerSize = grid.get_container_size();
+        sentTypeData.cloudContainerSize = cloud.get_container_size();
+    }
+
+    /* Send the data needed to create the datatypes */
+    MPI_Bcast(&sentTypeData, 1, sendDataType_DT, 1, globCom);
+
+    // Crée les datatype nécessaires
+    geomVect_DT = create_geometry_vector_datatype<double>();
+    vorticesContainer_DT = create_vector_datatype<double>(MPI_DOUBLE, sentTypeData.vorticesContainerSize);
+    vortices_DT = create_vortices_datatype(vorticesContainer_DT, geomVect_DT);
+
+    cartesianContainer_DT = create_vector_datatype<double>(MPI_DOUBLE, sentTypeData.gridContainerSize);
+    cartesianGrid_DT = create_cartesian_grid_of_speed_datatype(cartesianContainer_DT);
+
+    cloudPoint_DT = create_point_datatype<double>(MPI_DOUBLE);
+    cloudContainer_DT = create_vector_datatype<Geometry::Point<double>>(cloudPoint_DT, sentTypeData.cloudContainerSize);
+    cloud_DT = create_cloud_of_points_datatype(cloudContainer_DT);
+
+    config_DT = create_config_datatype(vortices_DT, cartesianGrid_DT, cloud_DT);
+
+    // Processus graphique
+    if (rank == 0)
+    {
+        // Reception des données des données au process graphique
+        MPI_Recv(&grid, 1, cartesianGrid_DT, 1, 101, globCom, MPI_STATUS_IGNORE);
 
         Graphisme::Screen myScreen({resx, resy}, {grid.getLeftBottomVertex(), grid.getRightTopVertex()});
         bool animate = false;
         double dt = 0.1;
-    }
-    else // Processus de calcul
-    {
-        // Vortices MPI datatype
-        MPI_Datatype geomVect_DT = create_geometry_vector_datatype<double>();
-        MPI_Datatype vorticesContainer_DT, vortices_DT;
 
-        // Cartesian grid of speed MPI datatype
-        MPI_Datatype cartesianContainer_DT, cartesianGrid_DT;
-
-        // Cloud of points MPI datatype
-        MPI_Datatype cloudPoint_DT = create_point_datatype<double>(MPI_DOUBLE);
-        MPI_Datatype cloudContainer_DT, cloud_DT;
-
-        // Final config datatype (tuple)
-        MPI_Datatype config_DT;
-
-        CONFIG_TYPE config;
-
-        if (calcRank == 0)
+        while (myScreen.isOpen())
         {
-            char const *filename;
-            if (nargs == 1)
+            auto start = std::chrono::system_clock::now();
+            bool advance = false;
+            // on inspecte tous les évènements de la fenêtre qui ont été émis depuis la précédente itération
+            sf::Event event;
+            while (myScreen.pollEvent(event))
             {
-                std::cout << "Usage : vortexsimulator <nom fichier configuration>" << std::endl;
-                return EXIT_FAILURE;
+                // évènement "fermeture demandée" : on ferme la fenêtre
+                if (event.type == sf::Event::Closed)
+                    myScreen.close();
+                if (event.type == sf::Event::Resized)
+                {
+                    // on met à jour la vue, avec la nouvelle taille de la fenêtre
+                    myScreen.resize(event);
+                }
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::P))
+                    animate = true;
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::S))
+                    animate = false;
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Up))
+                    dt *= 2;
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Down))
+                    dt /= 2;
+                if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right))
+                    advance = true;
             }
-
-            filename = argv[1];
-            std::ifstream fich(filename);
-            config = readConfigFile(fich);
-            fich.close();
-
-            auto vortices = std::get<0>(config);
-            // auto isMobile = std::get<1>(config);
-            auto grid = std::get<2>(config);
-            auto cloud = std::get<3>(config);
-
-            vorticesContainer_DT = create_vector_datatype<double>(MPI_DOUBLE, vortices.get_container_size());
-            vortices_DT = create_vortices_datatype(vorticesContainer_DT, geomVect_DT);
-
-            cartesianContainer_DT = create_vector_datatype<double>(MPI_DOUBLE, grid.get_container_size());
-            cartesianGrid_DT = create_cartesian_grid_of_speed_datatype(cartesianContainer_DT);
-
-            cloudContainer_DT = create_vector_datatype<Geometry::Point<double>>(cloudPoint_DT, cloud.get_container_size());
-            cloud_DT = create_cloud_of_points_datatype(cloudContainer_DT);
-
-            config_DT = create_config_datatype(vortices_DT, cartesianGrid_DT, cloud_DT);
+            if (animate | advance)
+            {
+                if (isMobile)
+                {
+                    cloud = Numeric::solve_RK4_movable_vortices(dt, grid, vortices, cloud);
+                }
+                else
+                {
+                    cloud = Numeric::solve_RK4_fixed_vortices(dt, grid, cloud);
+                }
+            }
+            myScreen.clear(sf::Color::Black);
+            std::string strDt = std::string("Time step : ") + std::to_string(dt);
+            myScreen.drawText(strDt, Geometry::Point<double>{50, double(myScreen.getGeometry().second - 96)});
+            myScreen.displayVelocityField(grid, vortices);
+            myScreen.displayParticles(grid, vortices, cloud);
+            auto end = std::chrono::system_clock::now();
+            std::chrono::duration<double> diff = end - start;
+            std::string str_fps = std::string("FPS : ") + std::to_string(1. / diff.count());
+            myScreen.drawText(str_fps, Geometry::Point<double>{300, double(myScreen.getGeometry().second - 96)});
+            myScreen.display();
         }
-
+    }
+    // Processus de calcul
+    else
+    {
+        /* Inutile pour seulement 2 processus
+        // Envoie des données aux processeurs de calcul
         MPI_Bcast(&config, 1, config_DT, 0, calcComm);
 
-        auto vortices = std::get<0>(config);
-        auto isMobile = std::get<1>(config);
-        auto grid = std::get<2>(config);
-        auto cloud = std::get<3>(config);
+        if (rank != 1)
+        {
+            auto vortices = std::get<0>(config);
+            auto isMobile = std::get<1>(config);
+            auto grid = std::get<2>(config);
+            auto cloud = std::get<3>(config);
+        }
+        */
 
         grid.updateVelocityField(vortices);
+
+        // Envoi des données au process graphique
+        MPI_Request req;
+        MPI_Isend(&grid, 1, cartesianGrid_DT, 0, 101, globCom, &req);
+        MPI_Request_free(&req); // Supprime la requête dès que l'envoi est terminé
     }
 
-    while (myScreen.isOpen())
-    {
-        auto start = std::chrono::system_clock::now();
-        bool advance = false;
-        // on inspecte tous les évènements de la fenêtre qui ont été émis depuis la précédente itération
-        sf::Event event;
-        while (myScreen.pollEvent(event))
-        {
-            // évènement "fermeture demandée" : on ferme la fenêtre
-            if (event.type == sf::Event::Closed)
-                myScreen.close();
-            if (event.type == sf::Event::Resized)
-            {
-                // on met à jour la vue, avec la nouvelle taille de la fenêtre
-                myScreen.resize(event);
-            }
-            if (sf::Keyboard::isKeyPressed(sf::Keyboard::P))
-                animate = true;
-            if (sf::Keyboard::isKeyPressed(sf::Keyboard::S))
-                animate = false;
-            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Up))
-                dt *= 2;
-            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Down))
-                dt /= 2;
-            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right))
-                advance = true;
-        }
-        if (animate | advance)
-        {
-            if (isMobile)
-            {
-                cloud = Numeric::solve_RK4_movable_vortices(dt, grid, vortices, cloud);
-            }
-            else
-            {
-                cloud = Numeric::solve_RK4_fixed_vortices(dt, grid, cloud);
-            }
-        }
-        myScreen.clear(sf::Color::Black);
-        std::string strDt = std::string("Time step : ") + std::to_string(dt);
-        myScreen.drawText(strDt, Geometry::Point<double>{50, double(myScreen.getGeometry().second - 96)});
-        myScreen.displayVelocityField(grid, vortices);
-        myScreen.displayParticles(grid, vortices, cloud);
-        auto end = std::chrono::system_clock::now();
-        std::chrono::duration<double> diff = end - start;
-        std::string str_fps = std::string("FPS : ") + std::to_string(1. / diff.count());
-        myScreen.drawText(str_fps, Geometry::Point<double>{300, double(myScreen.getGeometry().second - 96)});
-        myScreen.display();
-    }
+    MPI_Type_free(&sendDataType_DT);
+
+    MPI_Type_free(&config_DT);
+
+    MPI_Type_free(&cloud_DT);
+    MPI_Type_free(&cloudContainer_DT);
+    MPI_Type_free(&cloudPoint_DT);
+
+    MPI_Type_free(&cartesianGrid_DT);
+    MPI_Type_free(&cartesianContainer_DT);
+
+    MPI_Type_free(&vortices_DT);
+    MPI_Type_free(&vorticesContainer_DT);
+    MPI_Type_free(&geomVect_DT);
 
     MPI_Finalize();
 
