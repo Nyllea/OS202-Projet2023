@@ -1,10 +1,13 @@
 #ifndef _GEOMETRY_CLOUD_OF_POINTS_HPP_
 #define _GEOMETRY_CLOUD_OF_POINTS_HPP_
+
 #include <vector>
 #include <cassert>
 #include <algorithm>
 #include "point.hpp"
 #include "rectangle.hpp"
+
+#include <cstddef>
 
 namespace Geometry
 {
@@ -82,6 +85,17 @@ namespace Geometry
 
     private:
         container m_setOfPoints;
+
+    public:
+        static long int get_container_offset()
+        {
+            return offsetof(CloudOfPoints, m_setOfPoints);
+        }
+
+        size_t get_container_size() const
+        {
+            return m_setOfPoints.size();
+        }
     };
 
     CloudOfPoints generatePointsIn(std::size_t t_nbPoints, Rectangle const &t_area);
