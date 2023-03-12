@@ -33,6 +33,26 @@ struct SendDatatype
     std::size_t vorticesContainerSize, gridContainerSize, cloudContainerSize;
 };
 
+struct InitializationData
+{
+    int isMobile;
+    Numeric::CartesianGridOfSpeed cartesianGrid;
+};
+
+struct SimulationDataMobile
+{
+    Simulation::Vortices vortices;
+    Numeric::CartesianGridOfSpeed cartesianGrid;
+    Geometry::CloudOfPoints cloud;
+};
+
+struct SimulationCommands
+{
+    bool animate;
+    bool advance;
+    double dt;
+};
+
 auto readConfigFile(std::ifstream &input)
 {
     using point = Simulation::Vortices::point;
@@ -248,6 +268,68 @@ MPI_Datatype create_sendDataType_datatype()
     return sendDataType_DT;
 }
 
+MPI_Datatype create_initializationData_datatype(MPI_Datatype cartesianGrid_DT)
+{
+    int count = 2;
+
+    int block_lengths[count] = {1, 1};
+
+    MPI_Aint displacements[count] = {
+        offsetof(InitializationData, isMobile),
+        offsetof(InitializationData, cartesianGrid)};
+
+    MPI_Datatype types[count] = {MPI_INT, cartesianGrid_DT};
+
+    MPI_Datatype initializationData_DT;
+    MPI_Type_create_struct(count, block_lengths, displacements, types, &initializationData_DT);
+    MPI_Type_create_resized(initializationData_DT, 0, sizeof(InitializationData), &initializationData_DT);
+    MPI_Type_commit(&initializationData_DT);
+
+    return initializationData_DT;
+}
+
+MPI_Datatype create_simulationDataMobile_datatype(MPI_Datatype vortices_DT, MPI_Datatype cartesianGrid_DT, MPI_Datatype cloud_DT)
+{
+    int count = 3;
+
+    int block_lengths[count] = {1, 1, 1};
+
+    MPI_Aint displacements[count] = {
+        offsetof(SimulationDataMobile, vortices),
+        offsetof(SimulationDataMobile, cartesianGrid),
+        offsetof(SimulationDataMobile, cloud)};
+
+    MPI_Datatype types[count] = {vortices_DT, cartesianGrid_DT, cloud_DT};
+
+    MPI_Datatype simulationDataMobile_DT;
+    MPI_Type_create_struct(count, block_lengths, displacements, types, &simulationDataMobile_DT);
+    MPI_Type_create_resized(simulationDataMobile_DT, 0, sizeof(SimulationDataMobile), &simulationDataMobile_DT);
+    MPI_Type_commit(&simulationDataMobile_DT);
+
+    return simulationDataMobile_DT;
+}
+
+MPI_Datatype create_simulationCommands_datatype()
+{
+    int count = 3;
+
+    int block_lengths[count] = {1, 1, 1};
+
+    MPI_Aint displacements[count] = {
+        offsetof(SimulationCommands, animate),
+        offsetof(SimulationCommands, advance),
+        offsetof(SimulationCommands, dt)};
+
+    MPI_Datatype types[count] = {MPI_CXX_BOOL, MPI_CXX_BOOL, MPI_DOUBLE};
+
+    MPI_Datatype simulationCommands_DT;
+    MPI_Type_create_struct(count, block_lengths, displacements, types, &simulationCommands_DT);
+    MPI_Type_create_resized(simulationCommands_DT, 0, sizeof(SimulationCommands), &simulationCommands_DT);
+    MPI_Type_commit(&simulationCommands_DT);
+
+    return simulationCommands_DT;
+}
+
 int main(int nargs, char *argv[])
 {
     int rank, calcRank, nbp;
@@ -283,15 +365,26 @@ int main(int nargs, char *argv[])
     SendDatatype sentTypeData;
     MPI_Datatype sendDataType_DT = create_sendDataType_datatype();
 
+    // Datatype pour l'initialisation du processus graphique
+    MPI_Datatype initializationData_DT;
+
+    // Datatype pour l'envoie des données de simulation (dans le cas où isMobile est true)
+    MPI_Datatype simulationDataMobile_DT;
+
+    // Datatype pour l'envoie des commandes de la simulation, du processus graphique aux autres processus
+    MPI_Datatype simulationCommands_DT = create_simulationCommands_datatype();
+
     // Variables de la simulation
     Simulation::Vortices vortices;
-    int isMobile;
+    int isMobile = false;
     Numeric::CartesianGridOfSpeed grid;
     Geometry::CloudOfPoints cloud;
     CONFIG_TYPE config;
 
     // Variables pour l'affichage
     std::size_t resx = 800, resy = 600;
+
+    /* ---------------------------- Récupération des données de la simulation et affichage des instructions ---------------------------- */
 
     // Processus graphique
     if (rank == 0)
@@ -338,7 +431,7 @@ int main(int nargs, char *argv[])
     /* Send the data needed to create the datatypes */
     MPI_Bcast(&sentTypeData, 1, sendDataType_DT, 1, globCom);
 
-    // Crée les datatype nécessaires
+    // Crée les datatype nécessaires pour transmettre les données de simulation
     geomVect_DT = create_geometry_vector_datatype<double>();
     vorticesContainer_DT = create_vector_datatype<double>(MPI_DOUBLE, sentTypeData.vorticesContainerSize);
     vortices_DT = create_vortices_datatype(vorticesContainer_DT, geomVect_DT);
@@ -352,32 +445,50 @@ int main(int nargs, char *argv[])
 
     config_DT = create_config_datatype(vortices_DT, cartesianGrid_DT, cloud_DT);
 
+    simulationDataMobile_DT = create_simulationDataMobile_datatype(vortices_DT, cartesianGrid_DT, cloud_DT);
+
+    initializationData_DT = create_initializationData_datatype(cartesianGrid_DT);
+
+    /* --------------------------------------------------- Calcul et affichage de la simulation ---------------------------------------------------- */
+    bool animate = false;
+    double dt = 0.1;
+    bool advance = false;
+
     // Processus graphique
     if (rank == 0)
     {
-        // Reception des données des données au process graphique
-        MPI_Recv(&grid, 1, cartesianGrid_DT, 1, 101, globCom, MPI_STATUS_IGNORE);
+        // Reception des données nécessaires au process graphique
+        InitializationData initData;
+        MPI_Recv(&initData, 1, initializationData_DT, 1, 101, globCom, MPI_STATUS_IGNORE);
+        grid = initData.cartesianGrid;
+        isMobile = initData.isMobile;
 
         Graphisme::Screen myScreen({resx, resy}, {grid.getLeftBottomVertex(), grid.getRightTopVertex()});
-        bool animate = false;
-        double dt = 0.1;
 
         while (myScreen.isOpen())
         {
             auto start = std::chrono::system_clock::now();
-            bool advance = false;
-            // on inspecte tous les évènements de la fenêtre qui ont été émis depuis la précédente itération
+            advance = false;
+
+            // On inspecte tous les évènements de la fenêtre qui ont été émis depuis la précédente itération
             sf::Event event;
             while (myScreen.pollEvent(event))
             {
                 // évènement "fermeture demandée" : on ferme la fenêtre
                 if (event.type == sf::Event::Closed)
+                {
                     myScreen.close();
-                if (event.type == sf::Event::Resized)
+
+                    // Envoi d'un signal d'arret aux processus de calcul
+                    /* A FAIRE ! */
+                }
+                else if (event.type == sf::Event::Resized)
                 {
                     // on met à jour la vue, avec la nouvelle taille de la fenêtre
                     myScreen.resize(event);
                 }
+
+                // Gestion des évènements clavier
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::P))
                     animate = true;
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::S))
@@ -389,17 +500,20 @@ int main(int nargs, char *argv[])
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right))
                     advance = true;
             }
-            if (animate | advance)
+
+            // Broadcast/Envoie de advance, animate et dt (s'ils ont changé) au(x) processus de calcul (ie envoie d'un SimulationCommand)
+            /* A FAIRE ! */
+
+            // Récupération des informations de simulation: vortices, grid et cloud si isMobile = true (ie envoie d'un simulationDataMobile_DT), seulement cloud sinon
+            /* A FAIRE ! */
+            if (isMobile)
             {
-                if (isMobile)
-                {
-                    cloud = Numeric::solve_RK4_movable_vortices(dt, grid, vortices, cloud);
-                }
-                else
-                {
-                    cloud = Numeric::solve_RK4_fixed_vortices(dt, grid, cloud);
-                }
             }
+            else
+            {
+            }
+
+            // Mise à jour de la fenêtre
             myScreen.clear(sf::Color::Black);
             std::string strDt = std::string("Time step : ") + std::to_string(dt);
             myScreen.drawText(strDt, Geometry::Point<double>{50, double(myScreen.getGeometry().second - 96)});
@@ -415,28 +529,61 @@ int main(int nargs, char *argv[])
     // Processus de calcul
     else
     {
-        /* Inutile pour seulement 2 processus
-        // Envoie des données aux processeurs de calcul
-        MPI_Bcast(&config, 1, config_DT, 0, calcComm);
 
+        // Envoie des données aux autres processus de calcul (aucun si seulement 2 processus)
+        // MPI_Bcast(&config, 1, config_DT, 0, calcComm);
+
+        // Inutile pour seulement 2 processus
         if (rank != 1)
         {
-            auto vortices = std::get<0>(config);
-            auto isMobile = std::get<1>(config);
-            auto grid = std::get<2>(config);
-            auto cloud = std::get<3>(config);
+            vortices = std::get<0>(config);
+            isMobile = std::get<1>(config);
+            grid = std::get<2>(config);
+            cloud = std::get<3>(config);
         }
-        */
 
+        // Initialisation de la grille
         grid.updateVelocityField(vortices);
 
-        // Envoi des données au process graphique
+        // Envoi asynchrone des données d'initialisation au processus graphique
+        InitializationData initData = {isMobile, grid};
         MPI_Request req;
-        MPI_Isend(&grid, 1, cartesianGrid_DT, 0, 101, globCom, &req);
+        MPI_Isend(&initData, 1, initializationData_DT, 0, 101, globCom, &req);
         MPI_Request_free(&req); // Supprime la requête dès que l'envoi est terminé
+
+        /* while (fenêtre est ouverte, ie on n'a pas reçu de signal d'arrêt du processus graphique)
+        {*/
+
+        // Récupération des valeurs de advance, animate et broadcast du processus graphique
+        /* A FAIRE ! */
+
+        // Envoie asynchrone des données de la simulation au processus graphique: vortices, grid et cloud si isMobile (ie envoie d'un simulationDataMobile_DT), cloud sinon
+        /* A FAIRE ! */
+
+        // Simulation
+        if (animate | advance)
+        {
+            if (isMobile)
+            {
+                cloud = Numeric::solve_RK4_movable_vortices(dt, grid, vortices, cloud);
+            }
+            else
+            {
+                cloud = Numeric::solve_RK4_fixed_vortices(dt, grid, cloud);
+            }
+        }
+
+        /*}
+        Fin du while */
     }
 
+    MPI_Type_free(&simulationCommands_DT);
+
     MPI_Type_free(&sendDataType_DT);
+
+    MPI_Type_free(&simulationDataMobile_DT);
+
+    MPI_Type_free(&initializationData_DT);
 
     MPI_Type_free(&config_DT);
 
