@@ -80,21 +80,12 @@ namespace Simulation
         vector m_domainSize;
 
     public:
-        // Long int en type de retour car c'est le type de MPI_Aint
-        static long int get_cotainer_offset()
-        {
-            return offsetof(Vortices, m_centers_and_intensities);
-        }
-
-        static long int get_vector_offset()
-        {
-            return offsetof(Vortices, m_domainSize);
-        }
-
         size_t get_container_size() const
         {
             return m_centers_and_intensities.size();
         }
+
+        double *data() { return m_centers_and_intensities.data(); }
     };
 }
 

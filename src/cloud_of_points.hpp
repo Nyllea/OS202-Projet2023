@@ -85,17 +85,6 @@ namespace Geometry
 
     private:
         container m_setOfPoints;
-
-    public:
-        static long int get_container_offset()
-        {
-            return offsetof(CloudOfPoints, m_setOfPoints);
-        }
-
-        size_t get_container_size() const
-        {
-            return m_setOfPoints.size();
-        }
     };
 
     CloudOfPoints generatePointsIn(std::size_t t_nbPoints, Rectangle const &t_area);

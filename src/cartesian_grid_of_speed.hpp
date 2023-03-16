@@ -115,21 +115,6 @@ namespace Numeric
         container m_velocityField;
 
     public:
-        // Fonction retournant le tableau des offsets des variables de la classe
-        // Long int en type de retour car c'est le type de MPI_Aint
-        static long int *get_offsets()
-        {
-            long int *displacements = new long int[6];
-            displacements[0] = offsetof(CartesianGridOfSpeed, m_width);
-            displacements[1] = offsetof(CartesianGridOfSpeed, m_height);
-            displacements[2] = offsetof(CartesianGridOfSpeed, m_left);
-            displacements[3] = offsetof(CartesianGridOfSpeed, m_bottom);
-            displacements[4] = offsetof(CartesianGridOfSpeed, m_step);
-            displacements[5] = offsetof(CartesianGridOfSpeed, m_velocityField);
-
-            return displacements;
-        }
-
         std::size_t get_container_size() const
         {
             return m_width * m_height;

@@ -16,117 +16,43 @@
 #include <mpi.h>
 #include "vector.hpp"
 
-#define CONFIG_TYPE std::tuple<Simulation::Vortices, int, Numeric::CartesianGridOfSpeed, Geometry::CloudOfPoints>
+/* --------------------------------------Déclaration des structures nécessaires à la communication entre processus ----------------------------------------*/
 
 // Structure pour envoyer une configuration entière
-struct SendConfig
+struct FullConfig
 {
     Simulation::Vortices vortices;
     int isMobile;
-    Numeric::CartesianGridOfSpeed cartesianGrid;
-    Geometry::CloudOfPoints cloud;
-};
-
-// Structure pour envoyer les data nécessaires à la création des datatypes de MPI
-struct SendDatatype
-{
-    std::size_t vorticesContainerSize, gridContainerSize, cloudContainerSize;
-};
-
-struct InitializationData
-{
-    int isMobile;
-    Numeric::CartesianGridOfSpeed cartesianGrid;
-};
-
-struct SimulationDataMobile
-{
-    Simulation::Vortices vortices;
     Numeric::CartesianGridOfSpeed cartesianGrid;
     Geometry::CloudOfPoints cloud;
 };
 
 struct SimulationCommands
 {
+    bool endSimulation;
     bool animate;
     bool advance;
     double dt;
 };
 
-auto readConfigFile(std::ifstream &input)
+struct InitializationData
 {
-    using point = Simulation::Vortices::point;
+    bool dataLoaded;
 
-    int isMobile;
-    std::size_t nbVortices;
-    Numeric::CartesianGridOfSpeed cartesianGrid;
-    Geometry::CloudOfPoints cloudOfPoints;
-    constexpr std::size_t maxBuffer = 8192;
-    char buffer[maxBuffer];
-    std::string sbuffer;
-    std::stringstream ibuffer;
-    // Lit la première ligne de commentaire :
-    input.getline(buffer, maxBuffer); // Relit un commentaire
-    input.getline(buffer, maxBuffer); // Lecture de la grille cartésienne
-    sbuffer = std::string(buffer, maxBuffer);
-    ibuffer = std::stringstream(sbuffer);
-    double xleft, ybot, h;
-    std::size_t nx, ny;
-    ibuffer >> xleft >> ybot >> nx >> ny >> h;
-    cartesianGrid = Numeric::CartesianGridOfSpeed({nx, ny}, point{xleft, ybot}, h);
-    input.getline(buffer, maxBuffer); // Relit un commentaire
-    input.getline(buffer, maxBuffer); // Lit mode de génération des particules
-    sbuffer = std::string(buffer, maxBuffer);
-    ibuffer = std::stringstream(sbuffer);
     int modeGeneration;
-    ibuffer >> modeGeneration;
-    if (modeGeneration == 0) // Génération sur toute la grille
-    {
-        std::size_t nbPoints;
-        ibuffer >> nbPoints;
-        cloudOfPoints = Geometry::generatePointsIn(nbPoints, {cartesianGrid.getLeftBottomVertex(), cartesianGrid.getRightTopVertex()});
-    }
-    else
-    {
-        std::size_t nbPoints;
-        double xl, xr, yb, yt;
-        ibuffer >> xl >> yb >> xr >> yt >> nbPoints;
-        cloudOfPoints = Geometry::generatePointsIn(nbPoints, {point{xl, yb}, point{xr, yt}});
-    }
-    // Lit le nombre de vortex :
-    input.getline(buffer, maxBuffer); // Relit un commentaire
-    input.getline(buffer, maxBuffer); // Lit le nombre de vortex
-    sbuffer = std::string(buffer, maxBuffer);
-    ibuffer = std::stringstream(sbuffer);
-    try
-    {
-        ibuffer >> nbVortices;
-    }
-    catch (std::ios_base::failure &err)
-    {
-        std::cout << "Error " << err.what() << " found" << std::endl;
-        std::cout << "Read line : " << sbuffer << std::endl;
-        throw err;
-    }
-    Simulation::Vortices vortices(nbVortices, {cartesianGrid.getLeftBottomVertex(),
-                                               cartesianGrid.getRightTopVertex()});
-    input.getline(buffer, maxBuffer); // Relit un commentaire
-    for (std::size_t iVortex = 0; iVortex < nbVortices; ++iVortex)
-    {
-        input.getline(buffer, maxBuffer);
-        double x, y, force;
-        std::string sbuffer(buffer, maxBuffer);
-        std::stringstream ibuffer(sbuffer);
-        ibuffer >> x >> y >> force;
-        vortices.setVortex(iVortex, point{x, y}, force);
-    }
-    input.getline(buffer, maxBuffer); // Relit un commentaire
-    input.getline(buffer, maxBuffer); // Lit le mode de déplacement des vortex
-    sbuffer = std::string(buffer, maxBuffer);
-    ibuffer = std::stringstream(sbuffer);
-    ibuffer >> isMobile;
-    return std::make_tuple(vortices, isMobile, cartesianGrid, cloudOfPoints);
-}
+    int isMobile;
+
+    std::size_t nx, ny;
+    std::size_t nbPoints;
+    std::size_t nbVortices;
+
+    double xleft, ybot, h;
+    double xl, yb, xr, yt;
+
+    double *x, *y, *force;
+};
+
+/* --------------------------------------------- Fonctions de création/suppression des Datatype MPI nécessaires -------------------------------------------- */
 
 template <typename elementType>
 MPI_Datatype create_vector_datatype(MPI_Datatype mpi_elementType, int vectorLength)
@@ -161,42 +87,6 @@ MPI_Datatype create_geometry_vector_datatype()
     return geomVect_DT;
 }
 
-MPI_Datatype create_vortices_datatype(MPI_Datatype vorticesContainer_DT, MPI_Datatype geomVect_DT)
-{
-    int const count = 2;
-    int blocklengths[count] = {1, 1};
-
-    MPI_Datatype types[count] = {vorticesContainer_DT, geomVect_DT};
-    MPI_Aint offsets[count] = {Simulation::Vortices::get_cotainer_offset(),
-                               Simulation::Vortices::get_vector_offset()};
-
-    MPI_Datatype vortices_DT;
-    MPI_Type_create_struct(count, blocklengths, offsets, types, &vortices_DT);
-    MPI_Type_create_resized(vortices_DT, 0, sizeof(Simulation::Vortices), &vortices_DT);
-    MPI_Type_commit(&vortices_DT);
-
-    return vortices_DT;
-}
-
-MPI_Datatype create_cartesian_grid_of_speed_datatype(MPI_Datatype cartesianContainer_DT)
-{
-    int count = 6;
-
-    int block_lengths[count] = {1, 1, 1, 1, 1, 1};
-    long *tempOffsets = Numeric::CartesianGridOfSpeed::get_offsets();
-    MPI_Aint displacements[count] = {*tempOffsets};
-    MPI_Datatype types[count] = {MPI_UNSIGNED_LONG, MPI_UNSIGNED_LONG, MPI_DOUBLE, MPI_DOUBLE, MPI_DOUBLE, cartesianContainer_DT};
-
-    MPI_Datatype cartesian_DT;
-    MPI_Type_create_struct(count, block_lengths, displacements, types, &cartesian_DT);
-    MPI_Type_create_resized(cartesian_DT, 0, sizeof(Numeric::CartesianGridOfSpeed), &cartesian_DT);
-    MPI_Type_commit(&cartesian_DT);
-
-    free(tempOffsets);
-
-    return cartesian_DT;
-}
-
 template <typename RealType>
 MPI_Datatype create_point_datatype(MPI_Datatype mpi_realType_DT)
 {
@@ -214,113 +104,19 @@ MPI_Datatype create_point_datatype(MPI_Datatype mpi_realType_DT)
     return point_DT;
 }
 
-MPI_Datatype create_cloud_of_points_datatype(MPI_Datatype cloudContainer_DT)
-{
-    int count = 1;
-
-    int block_lengths[count] = {1};
-    MPI_Aint displacements[count] = {Geometry::CloudOfPoints::get_container_offset()};
-    MPI_Datatype types[count] = {cloudContainer_DT};
-
-    MPI_Datatype cloud_DT;
-    MPI_Type_create_struct(count, block_lengths, displacements, types, &cloud_DT);
-    MPI_Type_create_resized(cloud_DT, 0, sizeof(Geometry::CloudOfPoints), &cloud_DT);
-    MPI_Type_commit(&cloud_DT);
-
-    return cloud_DT;
-}
-
-MPI_Datatype create_config_datatype(MPI_Datatype vortices_DT, MPI_Datatype cartesianGrid_DT, MPI_Datatype cloud_DT)
+MPI_Datatype create_simulationCommands_datatype()
 {
     int count = 4;
 
     int block_lengths[count] = {1, 1, 1, 1};
 
     MPI_Aint displacements[count] = {
-        offsetof(SendConfig, vortices),
-        offsetof(SendConfig, isMobile),
-        offsetof(SendConfig, cartesianGrid),
-        offsetof(SendConfig, cloud)};
-
-    MPI_Datatype types[count] = {vortices_DT, MPI_INT, cartesianGrid_DT, cloud_DT};
-
-    MPI_Datatype config_DT;
-    MPI_Type_create_struct(count, block_lengths, displacements, types, &config_DT);
-    MPI_Type_create_resized(config_DT, 0, sizeof(SendConfig), &config_DT);
-    MPI_Type_commit(&config_DT);
-
-    return config_DT;
-}
-
-MPI_Datatype create_sendDataType_datatype()
-{
-    int count = 3;
-
-    int block_lengths[count] = {1, 1, 1};
-    MPI_Aint displacements[count] = {offsetof(SendDatatype, vorticesContainerSize), offsetof(SendDatatype, gridContainerSize), offsetof(SendDatatype, cloudContainerSize)};
-    MPI_Datatype types[count] = {MPI_UNSIGNED_LONG, MPI_UNSIGNED_LONG, MPI_UNSIGNED_LONG};
-
-    MPI_Datatype sendDataType_DT;
-    MPI_Type_create_struct(count, block_lengths, displacements, types, &sendDataType_DT);
-    MPI_Type_create_resized(sendDataType_DT, 0, sizeof(SendDatatype), &sendDataType_DT);
-    MPI_Type_commit(&sendDataType_DT);
-
-    return sendDataType_DT;
-}
-
-MPI_Datatype create_initializationData_datatype(MPI_Datatype cartesianGrid_DT)
-{
-    int count = 2;
-
-    int block_lengths[count] = {1, 1};
-
-    MPI_Aint displacements[count] = {
-        offsetof(InitializationData, isMobile),
-        offsetof(InitializationData, cartesianGrid)};
-
-    MPI_Datatype types[count] = {MPI_INT, cartesianGrid_DT};
-
-    MPI_Datatype initializationData_DT;
-    MPI_Type_create_struct(count, block_lengths, displacements, types, &initializationData_DT);
-    MPI_Type_create_resized(initializationData_DT, 0, sizeof(InitializationData), &initializationData_DT);
-    MPI_Type_commit(&initializationData_DT);
-
-    return initializationData_DT;
-}
-
-MPI_Datatype create_simulationDataMobile_datatype(MPI_Datatype vortices_DT, MPI_Datatype cartesianGrid_DT, MPI_Datatype cloud_DT)
-{
-    int count = 3;
-
-    int block_lengths[count] = {1, 1, 1};
-
-    MPI_Aint displacements[count] = {
-        offsetof(SimulationDataMobile, vortices),
-        offsetof(SimulationDataMobile, cartesianGrid),
-        offsetof(SimulationDataMobile, cloud)};
-
-    MPI_Datatype types[count] = {vortices_DT, cartesianGrid_DT, cloud_DT};
-
-    MPI_Datatype simulationDataMobile_DT;
-    MPI_Type_create_struct(count, block_lengths, displacements, types, &simulationDataMobile_DT);
-    MPI_Type_create_resized(simulationDataMobile_DT, 0, sizeof(SimulationDataMobile), &simulationDataMobile_DT);
-    MPI_Type_commit(&simulationDataMobile_DT);
-
-    return simulationDataMobile_DT;
-}
-
-MPI_Datatype create_simulationCommands_datatype()
-{
-    int count = 3;
-
-    int block_lengths[count] = {1, 1, 1};
-
-    MPI_Aint displacements[count] = {
+        offsetof(SimulationCommands, endSimulation),
         offsetof(SimulationCommands, animate),
         offsetof(SimulationCommands, advance),
         offsetof(SimulationCommands, dt)};
 
-    MPI_Datatype types[count] = {MPI_CXX_BOOL, MPI_CXX_BOOL, MPI_DOUBLE};
+    MPI_Datatype types[count] = {MPI_CXX_BOOL, MPI_CXX_BOOL, MPI_CXX_BOOL, MPI_DOUBLE};
 
     MPI_Datatype simulationCommands_DT;
     MPI_Type_create_struct(count, block_lengths, displacements, types, &simulationCommands_DT);
@@ -330,61 +126,169 @@ MPI_Datatype create_simulationCommands_datatype()
     return simulationCommands_DT;
 }
 
+MPI_Datatype create_initializationData_datatype()
+{
+    int count = 5;
+
+    int block_lengths[count] = {1, 2, 4, 7, 3};
+
+    MPI_Aint displacements[count] = {
+        offsetof(InitializationData, dataLoaded),
+        offsetof(InitializationData, modeGeneration),
+        offsetof(InitializationData, nx),
+        offsetof(InitializationData, xleft),
+        offsetof(InitializationData, x)};
+
+    MPI_Datatype types[count] = {MPI_CXX_BOOL, MPI_INT, MPI_UNSIGNED_LONG, MPI_DOUBLE, MPI_DOUBLE};
+
+    MPI_Datatype initData_DT;
+    MPI_Type_create_struct(count, block_lengths, displacements, types, &initData_DT);
+    MPI_Type_create_resized(initData_DT, 0, sizeof(InitializationData), &initData_DT);
+    MPI_Type_commit(&initData_DT);
+
+    return initData_DT;
+}
+
+// Nettoie toutes les variables MPI et appelle MPI_Finalize()
+void StopMPI(
+    MPI_Datatype *simulationCommands_DT, MPI_Datatype *initializationData_DT,
+    MPI_Datatype *cloudPoint_DT,
+    MPI_Datatype *geomVect_DT)
+{
+    MPI_Type_free(initializationData_DT);
+
+    MPI_Type_free(simulationCommands_DT);
+
+    MPI_Type_free(cloudPoint_DT);
+
+    MPI_Type_free(geomVect_DT);
+
+    MPI_Finalize();
+}
+
+/* ------------------------------------------ Fonctions de récupération des données initiale de la configuration ---------------------------------- */
+// Retourne toutes les informations nécessaires à l'initialisation des classes à partir du fichier
+InitializationData getConfig(std::ifstream &input)
+{
+    InitializationData initData;
+
+    constexpr std::size_t maxBuffer = 8192;
+    char buffer[maxBuffer];
+    std::string sbuffer;
+    std::stringstream ibuffer;
+    // Lit la première ligne de commentaire :
+    input.getline(buffer, maxBuffer); // Relit un commentaire
+    input.getline(buffer, maxBuffer); // Lecture de la grille cartésienne
+    sbuffer = std::string(buffer, maxBuffer);
+    ibuffer = std::stringstream(sbuffer);
+    ibuffer >> initData.xleft >> initData.ybot >> initData.nx >> initData.ny >> initData.h;
+    input.getline(buffer, maxBuffer); // Relit un commentaire
+    input.getline(buffer, maxBuffer); // Lit mode de génération des particules
+    sbuffer = std::string(buffer, maxBuffer);
+    ibuffer = std::stringstream(sbuffer);
+    ibuffer >> initData.modeGeneration;
+    if (initData.modeGeneration == 0) // Génération sur toute la grille
+    {
+        ibuffer >> initData.nbPoints;
+    }
+    else
+    {
+        ibuffer >> initData.xl >> initData.yb >> initData.xr >> initData.yt >> initData.nbPoints;
+    }
+    // Lit le nombre de vortex :
+    input.getline(buffer, maxBuffer); // Relit un commentaire
+    input.getline(buffer, maxBuffer); // Lit le nombre de vortex
+    sbuffer = std::string(buffer, maxBuffer);
+    ibuffer = std::stringstream(sbuffer);
+    try
+    {
+        ibuffer >> initData.nbVortices;
+    }
+    catch (std::ios_base::failure &err)
+    {
+        std::cout << "Error " << err.what() << " found" << std::endl;
+        std::cout << "Read line : " << sbuffer << std::endl;
+        throw err;
+    }
+    input.getline(buffer, maxBuffer); // Relit un commentaire
+    initData.x = new double[initData.nbVortices];
+    initData.y = new double[initData.nbVortices];
+    initData.force = new double[initData.nbVortices];
+    for (std::size_t iVortex = 0; iVortex < initData.nbVortices; ++iVortex)
+    {
+        input.getline(buffer, maxBuffer);
+        std::string sbuffer(buffer, maxBuffer);
+        std::stringstream ibuffer(sbuffer);
+        ibuffer >> initData.x[iVortex] >> initData.y[iVortex] >> initData.force[iVortex];
+    }
+    input.getline(buffer, maxBuffer); // Relit un commentaire
+    input.getline(buffer, maxBuffer); // Lit le mode de déplacement des vortex
+    sbuffer = std::string(buffer, maxBuffer);
+    ibuffer = std::stringstream(sbuffer);
+    ibuffer >> initData.isMobile;
+
+    return initData;
+}
+
+// Retourne les classes initialisées à partir des informations d'initialisation dans initData
+void readConfig(InitializationData &initData, FullConfig &fullConfig)
+{
+    using point = Simulation::Vortices::point;
+
+    fullConfig.cartesianGrid = Numeric::CartesianGridOfSpeed({initData.nx, initData.ny}, point{initData.xleft, initData.ybot}, initData.h);
+
+    if (initData.modeGeneration == 0) // Génération sur toute la grille
+    {
+        fullConfig.cloud = Geometry::generatePointsIn(initData.nbPoints, {fullConfig.cartesianGrid.getLeftBottomVertex(), fullConfig.cartesianGrid.getRightTopVertex()});
+    }
+    else
+    {
+        fullConfig.cloud = Geometry::generatePointsIn(initData.nbPoints, {point{initData.xl, initData.yb}, point{initData.xr, initData.yt}});
+    }
+
+    Simulation::Vortices vortices(initData.nbVortices, {fullConfig.cartesianGrid.getLeftBottomVertex(),
+                                                        fullConfig.cartesianGrid.getRightTopVertex()});
+
+    fullConfig.vortices = vortices;
+
+    for (std::size_t iVortex = 0; iVortex < initData.nbVortices; ++iVortex)
+    {
+        fullConfig.vortices.setVortex(iVortex, point{initData.x[iVortex], initData.y[iVortex]}, initData.force[iVortex]);
+    }
+}
+
 int main(int nargs, char *argv[])
 {
-    int rank, calcRank, nbp;
-    MPI_Comm globCom, calcComm;
+    /* ------------- Initialisation de MPI ----------------- */
+    int rank, nbp;
+    MPI_Comm globCom;
 
     MPI_Init(&nargs, &argv);
     MPI_Comm_dup(MPI_COMM_WORLD, &globCom);
     MPI_Comm_size(globCom, &nbp);
     MPI_Comm_rank(globCom, &rank);
 
-    // Initialisation du communicator de calcul
-    if (rank != 0)
-        MPI_Comm_split(globCom, 0, rank, &calcComm);
-
-    MPI_Comm_rank(calcComm, &calcRank);
-
-    /* MPI Datatypes definitions */
-    // Vortices MPI datatype
-    MPI_Datatype geomVect_DT;
-    MPI_Datatype vorticesContainer_DT, vortices_DT;
-
-    // Cartesian grid of speed MPI datatype
-    MPI_Datatype cartesianContainer_DT, cartesianGrid_DT;
-
-    // Cloud of points MPI datatype
-    MPI_Datatype cloudPoint_DT;
-    MPI_Datatype cloudContainer_DT, cloud_DT;
-
-    // Final config datatype (tuple)
-    MPI_Datatype config_DT;
-
-    // Variables nécessaire à l'envoi des données pour construire les autres datatypes
-    SendDatatype sentTypeData;
-    MPI_Datatype sendDataType_DT = create_sendDataType_datatype();
-
-    // Datatype pour l'initialisation du processus graphique
-    MPI_Datatype initializationData_DT;
-
-    // Datatype pour l'envoie des données de simulation (dans le cas où isMobile est true)
-    MPI_Datatype simulationDataMobile_DT;
+    /* --------------- Définition des Datatypes MPI ------------------ */
+    MPI_Datatype geomVect_DT = create_geometry_vector_datatype<double>();   // Geometry::Vector<double>
+    MPI_Datatype cloudPoint_DT = create_point_datatype<double>(MPI_DOUBLE); // Geometry::Point<double>
 
     // Datatype pour l'envoie des commandes de la simulation, du processus graphique aux autres processus
     MPI_Datatype simulationCommands_DT = create_simulationCommands_datatype();
 
-    // Variables de la simulation
-    Simulation::Vortices vortices;
-    int isMobile = false;
-    Numeric::CartesianGridOfSpeed grid;
-    Geometry::CloudOfPoints cloud;
-    CONFIG_TYPE config;
+    // Datatype pour l'envoie des données nécessaires à l'initialisation des classes
+    MPI_Datatype initializationData_DT = create_initializationData_datatype();
+
+    /* ------------- Variables nécessaires à la simulation ---------------- */
+    // Variable contenant l'état complet de la simulation
+    FullConfig fullConfig;
+
+    // Données nécessaires à l'initialisation des classes
+    InitializationData initData;
 
     // Variables pour l'affichage
     std::size_t resx = 800, resy = 600;
 
-    /* ---------------------------- Récupération des données de la simulation et affichage des instructions ---------------------------- */
+    /* ---------------------------------- Récupération des données de la simulation et affichage des instructions --------------------------------- */
 
     // Processus graphique
     if (rank == 0)
@@ -409,66 +313,80 @@ int main(int nargs, char *argv[])
         if (nargs == 1)
         {
             std::cout << "Usage : vortexsimulator <nom fichier configuration>" << std::endl;
-            return EXIT_FAILURE;
+
+            initData.dataLoaded = false;
         }
+        else
+        {
+            filename = argv[1];
+            std::ifstream fich(filename);
+            initData = getConfig(fich);
+            fich.close();
 
-        filename = argv[1];
-        std::ifstream fich(filename);
-        config = readConfigFile(fich);
-        fich.close();
-
-        vortices = std::get<0>(config);
-        isMobile = std::get<1>(config);
-        grid = std::get<2>(config);
-        cloud = std::get<3>(config);
-
-        // Données à envoyer pour construire les Datatype
-        sentTypeData.vorticesContainerSize = vortices.get_container_size();
-        sentTypeData.gridContainerSize = grid.get_container_size();
-        sentTypeData.cloudContainerSize = cloud.get_container_size();
+            initData.dataLoaded = true;
+        }
     }
 
-    /* Send the data needed to create the datatypes */
-    MPI_Bcast(&sentTypeData, 1, sendDataType_DT, 1, globCom);
+    /* --------------------------------------- Envoie des données de simulation à tous les processus ---------------------------------- */
 
-    // Crée les datatype nécessaires pour transmettre les données de simulation
-    geomVect_DT = create_geometry_vector_datatype<double>();
-    vorticesContainer_DT = create_vector_datatype<double>(MPI_DOUBLE, sentTypeData.vorticesContainerSize);
-    vortices_DT = create_vortices_datatype(vorticesContainer_DT, geomVect_DT);
+    // Envoie des données nécessaires à l'initialisation des classes
+    MPI_Bcast(&initData, 1, initializationData_DT, 1, globCom);
 
-    cartesianContainer_DT = create_vector_datatype<double>(MPI_DOUBLE, sentTypeData.gridContainerSize);
-    cartesianGrid_DT = create_cartesian_grid_of_speed_datatype(cartesianContainer_DT);
+    // Arrêt si les données n'ont pas été chargées
+    if (!initData.dataLoaded)
+    {
+        std::cout << "Data not properly loaded" << std::endl;
 
-    cloudPoint_DT = create_point_datatype<double>(MPI_DOUBLE);
-    cloudContainer_DT = create_vector_datatype<Geometry::Point<double>>(cloudPoint_DT, sentTypeData.cloudContainerSize);
-    cloud_DT = create_cloud_of_points_datatype(cloudContainer_DT);
+        if (initData.x != NULL)
+            delete[] initData.x;
+        if (initData.y != NULL)
+            delete[] initData.y;
+        if (initData.force != NULL)
+            delete[] initData.force;
 
-    config_DT = create_config_datatype(vortices_DT, cartesianGrid_DT, cloud_DT);
+        StopMPI(&simulationCommands_DT, &initializationData_DT, &cloudPoint_DT, &geomVect_DT);
 
-    simulationDataMobile_DT = create_simulationDataMobile_datatype(vortices_DT, cartesianGrid_DT, cloud_DT);
+        return EXIT_FAILURE;
+    }
 
-    initializationData_DT = create_initializationData_datatype(cartesianGrid_DT);
+    // Envoie des données des vortex aux processus
+    if (rank != 1)
+    {
+        initData.x = new double[initData.nbVortices];
+        initData.y = new double[initData.nbVortices];
+        initData.force = new double[initData.nbVortices];
+    }
+
+    MPI_Bcast(initData.x, initData.nbVortices, MPI_DOUBLE, 1, globCom);
+    MPI_Bcast(initData.y, initData.nbVortices, MPI_DOUBLE, 1, globCom);
+    MPI_Bcast(initData.force, initData.nbVortices, MPI_DOUBLE, 1, globCom);
+
+    // Création et initialisation des classes
+    readConfig(initData, fullConfig);
+    fullConfig.isMobile = initData.isMobile;
 
     /* --------------------------------------------------- Calcul et affichage de la simulation ---------------------------------------------------- */
-    bool animate = false;
-    double dt = 0.1;
-    bool advance = false;
+    SimulationCommands simCommand;
+
+    simCommand.animate = false;
+    simCommand.dt = 0.1;
+    simCommand.advance = false;
+    simCommand.endSimulation = false;
+
+    MPI_Request req[3];
 
     // Processus graphique
     if (rank == 0)
     {
-        // Reception des données nécessaires au process graphique
-        InitializationData initData;
-        MPI_Recv(&initData, 1, initializationData_DT, 1, 101, globCom, MPI_STATUS_IGNORE);
-        grid = initData.cartesianGrid;
-        isMobile = initData.isMobile;
+        // Reception de la grille initale
+        MPI_Recv(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.get_container_size(), geomVect_DT, 1, 101, globCom, MPI_STATUS_IGNORE);
 
-        Graphisme::Screen myScreen({resx, resy}, {grid.getLeftBottomVertex(), grid.getRightTopVertex()});
+        Graphisme::Screen myScreen({resx, resy}, {fullConfig.cartesianGrid.getLeftBottomVertex(), fullConfig.cartesianGrid.getRightTopVertex()});
 
         while (myScreen.isOpen())
         {
             auto start = std::chrono::system_clock::now();
-            advance = false;
+            simCommand.advance = false;
 
             // On inspecte tous les évènements de la fenêtre qui ont été émis depuis la précédente itération
             sf::Event event;
@@ -479,8 +397,7 @@ int main(int nargs, char *argv[])
                 {
                     myScreen.close();
 
-                    // Envoi d'un signal d'arret aux processus de calcul
-                    /* A FAIRE ! */
+                    simCommand.endSimulation = true;
                 }
                 else if (event.type == sf::Event::Resized)
                 {
@@ -490,115 +407,162 @@ int main(int nargs, char *argv[])
 
                 // Gestion des évènements clavier
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::P))
-                    animate = true;
+                    simCommand.animate = true;
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::S))
-                    animate = false;
+                    simCommand.animate = false;
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Up))
-                    dt *= 2;
+                    simCommand.dt *= 2;
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Down))
-                    dt /= 2;
+                    simCommand.dt /= 2;
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right))
-                    advance = true;
+                    simCommand.advance = true;
             }
 
             // Broadcast/Envoie de advance, animate et dt (s'ils ont changé) au(x) processus de calcul (ie envoie d'un SimulationCommand)
-            /* A FAIRE ! */
+            MPI_Bcast(&simCommand, 1, simulationCommands_DT, 0, globCom);
 
-            // Récupération des informations de simulation: vortices, grid et cloud si isMobile = true (ie envoie d'un simulationDataMobile_DT), seulement cloud sinon
-            /* A FAIRE ! */
-            if (isMobile)
+            if (!simCommand.endSimulation)
             {
-            }
-            else
-            {
-            }
+                // Récupération des informations de simulation: vortices, grid et cloud si isMobile = true, seulement cloud sinon
+                if (fullConfig.isMobile)
+                {
+                    MPI_Irecv(fullConfig.vortices.data(), fullConfig.vortices.get_container_size(), MPI_DOUBLE, 1, 5, globCom, &req[0]);
+                    MPI_Irecv(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.get_container_size(), geomVect_DT, 1, 6, globCom, &req[1]);
+                    MPI_Irecv(fullConfig.cloud.data(), fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 1, 7, globCom, &req[2]);
+                }
+                else
+                {
+                    MPI_Irecv(fullConfig.cloud.data(), fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 1, 7, globCom, &req[2]);
+                }
 
-            // Mise à jour de la fenêtre
-            myScreen.clear(sf::Color::Black);
-            std::string strDt = std::string("Time step : ") + std::to_string(dt);
-            myScreen.drawText(strDt, Geometry::Point<double>{50, double(myScreen.getGeometry().second - 96)});
-            myScreen.displayVelocityField(grid, vortices);
-            myScreen.displayParticles(grid, vortices, cloud);
-            auto end = std::chrono::system_clock::now();
-            std::chrono::duration<double> diff = end - start;
-            std::string str_fps = std::string("FPS : ") + std::to_string(1. / diff.count());
-            myScreen.drawText(str_fps, Geometry::Point<double>{300, double(myScreen.getGeometry().second - 96)});
-            myScreen.display();
+                // Mise à jour de la fenêtre
+                myScreen.clear(sf::Color::Black);
+                std::string strDt = std::string("Time step : ") + std::to_string(simCommand.dt);
+                myScreen.drawText(strDt, Geometry::Point<double>{50, double(myScreen.getGeometry().second - 96)});
+
+                // On s'assure d'avoir reçu les données (cette partie est lente car beaucoup de données dans cartesianGrid)
+                if (fullConfig.isMobile)
+                    MPI_Waitall(2, req, MPI_STATUSES_IGNORE);
+
+                myScreen.displayVelocityField(fullConfig.cartesianGrid, fullConfig.vortices);
+
+                MPI_Wait(&req[2], MPI_STATUS_IGNORE); // On s'assure d'avoir reçu les données
+
+                myScreen.displayParticles(fullConfig.cartesianGrid, fullConfig.vortices, fullConfig.cloud);
+                auto end = std::chrono::system_clock::now();
+                std::chrono::duration<double> diff = end - start;
+                std::string str_fps = std::string("FPS : ") + std::to_string(1. / diff.count());
+                myScreen.drawText(str_fps, Geometry::Point<double>{300, double(myScreen.getGeometry().second - 96)});
+                myScreen.display();
+            }
         }
     }
     // Processus de calcul
     else
     {
-
-        // Envoie des données aux autres processus de calcul (aucun si seulement 2 processus)
-        // MPI_Bcast(&config, 1, config_DT, 0, calcComm);
-
-        // Inutile pour seulement 2 processus
-        if (rank != 1)
-        {
-            vortices = std::get<0>(config);
-            isMobile = std::get<1>(config);
-            grid = std::get<2>(config);
-            cloud = std::get<3>(config);
-        }
+        // Nombre de requêtes en cours
+        int nbRequest = 1;
 
         // Initialisation de la grille
-        grid.updateVelocityField(vortices);
+        fullConfig.cartesianGrid.updateVelocityField(fullConfig.vortices);
 
-        // Envoi asynchrone des données d'initialisation au processus graphique
-        InitializationData initData = {isMobile, grid};
-        MPI_Request req;
-        MPI_Isend(&initData, 1, initializationData_DT, 0, 101, globCom, &req);
-        MPI_Request_free(&req); // Supprime la requête dès que l'envoi est terminé
+        // Envoi asynchrone de la grille au processus graphique (Buffer inutile ici car on ne modifie pas cette donnée avant le prochain MPI_Wait)
+        MPI_Isend(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.get_container_size(), geomVect_DT, 0, 101, globCom, &req[0]);
 
-        /* while (fenêtre est ouverte, ie on n'a pas reçu de signal d'arrêt du processus graphique)
-        {*/
+        // On récupère la taille des données à transmettre
+        int cloudPoint_DT_size, geomVect_DT_size;
+        MPI_Type_size(cloudPoint_DT, &cloudPoint_DT_size);
+        MPI_Type_size(geomVect_DT, &geomVect_DT_size);
 
-        // Récupération des valeurs de advance, animate et broadcast du processus graphique
-        /* A FAIRE ! */
+        int grid_size = fullConfig.cartesianGrid.get_container_size() * geomVect_DT_size;
 
-        // Envoie asynchrone des données de la simulation au processus graphique: vortices, grid et cloud si isMobile (ie envoie d'un simulationDataMobile_DT), cloud sinon
-        /* A FAIRE ! */
+        // On crée les buffer permettant un envoie asynchrone des données
+        double *grid_buffer = new double[grid_size];
+        double *vortices_buffer = new double[fullConfig.vortices.get_container_size()];
+        Geometry::Point<double> *cloud_buffer = new Geometry::Point<double>[fullConfig.cloud.numberOfPoints()];
 
-        // Simulation
-        if (animate | advance)
+        // Tant que la simulation est en cours
+        while (!simCommand.endSimulation)
         {
-            if (isMobile)
+            // Récupération des commandes du processus graphique
+            MPI_Bcast(&simCommand, 1, simulationCommands_DT, 0, globCom);
+
+            if (!simCommand.endSimulation)
             {
-                cloud = Numeric::solve_RK4_movable_vortices(dt, grid, vortices, cloud);
-            }
-            else
-            {
-                cloud = Numeric::solve_RK4_fixed_vortices(dt, grid, cloud);
+                // On s'assure que les données précédentes ont bien été envoyées et réceptionnées
+                MPI_Waitall(nbRequest, req, MPI_STATUSES_IGNORE);
+
+                // Envoie asynchrone des données de la simulation au processus graphique: vortices, grid et cloud si isMobile, cloud sinon
+                // On utilise des buffer pour s'assurer de ne pas modifier les données pendant l'envoi
+                if (fullConfig.isMobile)
+                {
+                    // Copie dans les buffer
+                    std::copy(fullConfig.vortices.data(), fullConfig.vortices.data() + fullConfig.vortices.get_container_size(), vortices_buffer);
+                    std::copy(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.data() + grid_size, grid_buffer);
+                    std::copy(fullConfig.cloud.begin(), fullConfig.cloud.end(), cloud_buffer);
+
+                    // Envoie asynchrone
+                    MPI_Isend(vortices_buffer, fullConfig.vortices.get_container_size(), MPI_DOUBLE, 0, 5, globCom, &req[0]);
+                    MPI_Isend(grid_buffer, fullConfig.cartesianGrid.get_container_size(), geomVect_DT, 0, 6, globCom, &req[1]);
+                    MPI_Isend(cloud_buffer, fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 0, 7, globCom, &req[2]);
+
+                    nbRequest = 3;
+                }
+                else
+                {
+                    // Copie dans le buffer
+                    std::copy(fullConfig.cloud.begin(), fullConfig.cloud.end(), cloud_buffer);
+
+                    // Envoie asynchrone
+                    MPI_Isend(cloud_buffer, fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 0, 7, globCom, &req[0]);
+                }
+
+                // Mesure de la vitesse de calcul
+                auto start = std::chrono::system_clock::now();
+
+                // Simulation
+                if (simCommand.animate | simCommand.advance)
+                {
+                    if (fullConfig.isMobile)
+                    {
+                        fullConfig.cloud = Numeric::solve_RK4_movable_vortices(simCommand.dt, fullConfig.cartesianGrid, fullConfig.vortices, fullConfig.cloud);
+                    }
+                    else
+                    {
+                        fullConfig.cloud = Numeric::solve_RK4_fixed_vortices(simCommand.dt, fullConfig.cartesianGrid, fullConfig.cloud);
+                    }
+                }
+
+                auto end = std::chrono::system_clock::now();
+
+                std::chrono::duration<double> diff = end - start;
+                std::string str_fps = std::string("Calculations per second  : ") + std::to_string(1. / diff.count());
+                std::cout << str_fps << "\r";
             }
         }
 
-        /*}
-        Fin du while */
+        // Libération de la mémoire
+        MPI_Request_free(&req[0]);
+        MPI_Request_free(&req[1]);
+        MPI_Request_free(&req[2]);
+
+        if (grid_buffer != NULL)
+            delete[] grid_buffer;
+        if (vortices_buffer != NULL)
+            delete[] vortices_buffer;
+        if (cloud_buffer != NULL)
+            delete[] cloud_buffer;
     }
 
-    MPI_Type_free(&simulationCommands_DT);
+    // Libération de la mémoire et fin
+    if (initData.x != NULL)
+        delete[] initData.x;
+    if (initData.y != NULL)
+        delete[] initData.y;
+    if (initData.force != NULL)
+        delete[] initData.force;
 
-    MPI_Type_free(&sendDataType_DT);
-
-    MPI_Type_free(&simulationDataMobile_DT);
-
-    MPI_Type_free(&initializationData_DT);
-
-    MPI_Type_free(&config_DT);
-
-    MPI_Type_free(&cloud_DT);
-    MPI_Type_free(&cloudContainer_DT);
-    MPI_Type_free(&cloudPoint_DT);
-
-    MPI_Type_free(&cartesianGrid_DT);
-    MPI_Type_free(&cartesianContainer_DT);
-
-    MPI_Type_free(&vortices_DT);
-    MPI_Type_free(&vorticesContainer_DT);
-    MPI_Type_free(&geomVect_DT);
-
-    MPI_Finalize();
+    StopMPI(&simulationCommands_DT, &initializationData_DT, &cloudPoint_DT, &geomVect_DT);
 
     return EXIT_SUCCESS;
 }
