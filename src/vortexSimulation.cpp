@@ -374,6 +374,7 @@ int main(int nargs, char *argv[])
     simCommand.endSimulation = false;
 
     MPI_Request req[3];
+    int nbRequest = 1; // Nombre de requêtes en cours
 
     // Processus graphique
     if (rank == 0)
@@ -426,13 +427,15 @@ int main(int nargs, char *argv[])
                 // Récupération des informations de simulation: vortices, grid et cloud si isMobile = true, seulement cloud sinon
                 if (fullConfig.isMobile)
                 {
-                    MPI_Irecv(fullConfig.vortices.data(), fullConfig.vortices.get_container_size(), MPI_DOUBLE, 1, 5, globCom, &req[0]);
+                    MPI_Irecv(fullConfig.vortices.data(), fullConfig.vortices.get_container_size(), MPI_DOUBLE, 1, 5, globCom, &req[2]);
                     MPI_Irecv(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.get_container_size(), geomVect_DT, 1, 6, globCom, &req[1]);
-                    MPI_Irecv(fullConfig.cloud.data(), fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 1, 7, globCom, &req[2]);
+                    MPI_Irecv(fullConfig.cloud.data(), fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 1, 7, globCom, &req[0]);
+
+                    nbRequest = 3;
                 }
                 else
                 {
-                    MPI_Irecv(fullConfig.cloud.data(), fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 1, 7, globCom, &req[2]);
+                    MPI_Irecv(fullConfig.cloud.data(), fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 1, 7, globCom, &req[0]);
                 }
 
                 // Mise à jour de la fenêtre
@@ -442,11 +445,11 @@ int main(int nargs, char *argv[])
 
                 // On s'assure d'avoir reçu les données (cette partie est lente car beaucoup de données dans cartesianGrid)
                 if (fullConfig.isMobile)
-                    MPI_Waitall(2, req, MPI_STATUSES_IGNORE);
+                    MPI_Waitall(2, &req[1], MPI_STATUSES_IGNORE);
 
                 myScreen.displayVelocityField(fullConfig.cartesianGrid, fullConfig.vortices);
 
-                MPI_Wait(&req[2], MPI_STATUS_IGNORE); // On s'assure d'avoir reçu les données
+                MPI_Wait(&req[0], MPI_STATUS_IGNORE); // On s'assure d'avoir reçu les données
 
                 myScreen.displayParticles(fullConfig.cartesianGrid, fullConfig.vortices, fullConfig.cloud);
                 auto end = std::chrono::system_clock::now();
@@ -460,9 +463,6 @@ int main(int nargs, char *argv[])
     // Processus de calcul
     else
     {
-        // Nombre de requêtes en cours
-        int nbRequest = 1;
-
         // Initialisation de la grille
         fullConfig.cartesianGrid.updateVelocityField(fullConfig.vortices);
 
@@ -542,10 +542,6 @@ int main(int nargs, char *argv[])
         }
 
         // Libération de la mémoire
-        MPI_Request_free(&req[0]);
-        MPI_Request_free(&req[1]);
-        MPI_Request_free(&req[2]);
-
         if (grid_buffer != NULL)
             delete[] grid_buffer;
         if (vortices_buffer != NULL)
