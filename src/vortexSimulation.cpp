@@ -373,8 +373,23 @@ int main(int nargs, char *argv[])
     simCommand.advance = false;
     simCommand.endSimulation = false;
 
-    MPI_Request req[3];
-    int nbRequest = 1; // Nombre de requêtes en cours
+    MPI_Request req;
+
+    // On récupère la taille des données à transmettre
+    int cloudPoint_DT_size, geomVect_DT_size;
+    MPI_Type_size(cloudPoint_DT, &cloudPoint_DT_size);
+    MPI_Type_size(geomVect_DT, &geomVect_DT_size);
+
+    int grid_size_as_double = fullConfig.cartesianGrid.get_container_size() * geomVect_DT_size / sizeof(double);
+    int cloud_size_as_double = fullConfig.cloud.numberOfPoints() * cloudPoint_DT_size / sizeof(double);
+    int vortices_size = fullConfig.vortices.get_container_size();
+
+    // On crée le buffer d'envoie/de réception des données
+    int allBufferSize = grid_size_as_double + fullConfig.vortices.get_container_size() + cloud_size_as_double;
+
+    double *gigaBuffer = NULL;
+    if (fullConfig.isMobile)
+        gigaBuffer = new double[allBufferSize];
 
     // Processus graphique
     if (rank == 0)
@@ -427,30 +442,24 @@ int main(int nargs, char *argv[])
                 // Récupération des informations de simulation: vortices, grid et cloud si isMobile = true, seulement cloud sinon
                 if (fullConfig.isMobile)
                 {
-                    MPI_Irecv(fullConfig.vortices.data(), fullConfig.vortices.get_container_size(), MPI_DOUBLE, 1, 5, globCom, &req[2]);
-                    MPI_Irecv(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.get_container_size(), geomVect_DT, 1, 6, globCom, &req[1]);
-                    MPI_Irecv(fullConfig.cloud.data(), fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 1, 7, globCom, &req[0]);
+                    // Réception des données (c'est la partie lente qui limite les FPS)
+                    MPI_Recv(gigaBuffer, allBufferSize, MPI_DOUBLE, 1, 5, globCom, MPI_STATUS_IGNORE);
 
-                    nbRequest = 3;
+                    // Copie depuis le buffer dans la structure
+                    std::copy(gigaBuffer, gigaBuffer + vortices_size, fullConfig.vortices.data());
+                    std::copy(&gigaBuffer[vortices_size], &gigaBuffer[vortices_size] + grid_size_as_double, fullConfig.cartesianGrid.data());
+                    std::copy(&gigaBuffer[vortices_size + grid_size_as_double], &gigaBuffer[vortices_size + grid_size_as_double] + cloud_size_as_double, fullConfig.cloud.data());
                 }
                 else
                 {
-                    MPI_Irecv(fullConfig.cloud.data(), fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 1, 7, globCom, &req[0]);
+                    MPI_Recv(fullConfig.cloud.data(), fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 1, 5, globCom, MPI_STATUS_IGNORE);
                 }
 
                 // Mise à jour de la fenêtre
                 myScreen.clear(sf::Color::Black);
                 std::string strDt = std::string("Time step : ") + std::to_string(simCommand.dt);
                 myScreen.drawText(strDt, Geometry::Point<double>{50, double(myScreen.getGeometry().second - 96)});
-
-                // On s'assure d'avoir reçu les données (cette partie est lente car beaucoup de données dans cartesianGrid)
-                if (fullConfig.isMobile)
-                    MPI_Waitall(2, &req[1], MPI_STATUSES_IGNORE);
-
                 myScreen.displayVelocityField(fullConfig.cartesianGrid, fullConfig.vortices);
-
-                MPI_Wait(&req[0], MPI_STATUS_IGNORE); // On s'assure d'avoir reçu les données
-
                 myScreen.displayParticles(fullConfig.cartesianGrid, fullConfig.vortices, fullConfig.cloud);
                 auto end = std::chrono::system_clock::now();
                 std::chrono::duration<double> diff = end - start;
@@ -467,19 +476,12 @@ int main(int nargs, char *argv[])
         fullConfig.cartesianGrid.updateVelocityField(fullConfig.vortices);
 
         // Envoi asynchrone de la grille au processus graphique (Buffer inutile ici car on ne modifie pas cette donnée avant le prochain MPI_Wait)
-        MPI_Isend(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.get_container_size(), geomVect_DT, 0, 101, globCom, &req[0]);
+        MPI_Isend(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.get_container_size(), geomVect_DT, 0, 101, globCom, &req);
 
-        // On récupère la taille des données à transmettre
-        int cloudPoint_DT_size, geomVect_DT_size;
-        MPI_Type_size(cloudPoint_DT, &cloudPoint_DT_size);
-        MPI_Type_size(geomVect_DT, &geomVect_DT_size);
-
-        int grid_size = fullConfig.cartesianGrid.get_container_size() * geomVect_DT_size;
-
-        // On crée les buffer permettant un envoie asynchrone des données
-        double *grid_buffer = new double[grid_size];
-        double *vortices_buffer = new double[fullConfig.vortices.get_container_size()];
-        Geometry::Point<double> *cloud_buffer = new Geometry::Point<double>[fullConfig.cloud.numberOfPoints()];
+        // On crée le buffer permettant un envoie asynchrone des données
+        double *cloud_buffer = NULL;
+        if (!fullConfig.isMobile)
+            cloud_buffer = new double[cloud_size_as_double];
 
         // Tant que la simulation est en cours
         while (!simCommand.endSimulation)
@@ -490,31 +492,27 @@ int main(int nargs, char *argv[])
             if (!simCommand.endSimulation)
             {
                 // On s'assure que les données précédentes ont bien été envoyées et réceptionnées
-                MPI_Waitall(nbRequest, req, MPI_STATUSES_IGNORE);
+                MPI_Wait(&req, MPI_STATUS_IGNORE);
 
                 // Envoie asynchrone des données de la simulation au processus graphique: vortices, grid et cloud si isMobile, cloud sinon
                 // On utilise des buffer pour s'assurer de ne pas modifier les données pendant l'envoi
                 if (fullConfig.isMobile)
                 {
-                    // Copie dans les buffer
-                    std::copy(fullConfig.vortices.data(), fullConfig.vortices.data() + fullConfig.vortices.get_container_size(), vortices_buffer);
-                    std::copy(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.data() + grid_size, grid_buffer);
-                    std::copy(fullConfig.cloud.begin(), fullConfig.cloud.end(), cloud_buffer);
+                    // Copie dans le buffer
+                    std::copy(fullConfig.vortices.data(), fullConfig.vortices.data() + vortices_size, gigaBuffer);
+                    std::copy(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.data() + grid_size_as_double, &gigaBuffer[vortices_size]);
+                    std::copy(fullConfig.cloud.data(), fullConfig.cloud.data() + cloud_size_as_double, &gigaBuffer[vortices_size + grid_size_as_double]);
 
                     // Envoie asynchrone
-                    MPI_Isend(vortices_buffer, fullConfig.vortices.get_container_size(), MPI_DOUBLE, 0, 5, globCom, &req[0]);
-                    MPI_Isend(grid_buffer, fullConfig.cartesianGrid.get_container_size(), geomVect_DT, 0, 6, globCom, &req[1]);
-                    MPI_Isend(cloud_buffer, fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 0, 7, globCom, &req[2]);
-
-                    nbRequest = 3;
+                    MPI_Isend(gigaBuffer, allBufferSize, MPI_DOUBLE, 0, 5, globCom, &req);
                 }
                 else
                 {
                     // Copie dans le buffer
-                    std::copy(fullConfig.cloud.begin(), fullConfig.cloud.end(), cloud_buffer);
+                    std::copy(fullConfig.cloud.data(), fullConfig.cloud.data() + cloud_size_as_double, cloud_buffer);
 
                     // Envoie asynchrone
-                    MPI_Isend(cloud_buffer, fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 0, 7, globCom, &req[0]);
+                    MPI_Isend(cloud_buffer, fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 0, 5, globCom, &req);
                 }
 
                 // Mesure de la vitesse de calcul
@@ -542,15 +540,14 @@ int main(int nargs, char *argv[])
         }
 
         // Libération de la mémoire
-        if (grid_buffer != NULL)
-            delete[] grid_buffer;
-        if (vortices_buffer != NULL)
-            delete[] vortices_buffer;
         if (cloud_buffer != NULL)
             delete[] cloud_buffer;
     }
 
     // Libération de la mémoire et fin
+    if (gigaBuffer != NULL)
+        delete[] gigaBuffer;
+
     if (initData.x != NULL)
         delete[] initData.x;
     if (initData.y != NULL)
