@@ -87,7 +87,7 @@ namespace Geometry
         container m_setOfPoints;
     };
 
-    CloudOfPoints generatePointsIn(std::size_t t_nbPoints, Rectangle const &t_area);
+    CloudOfPoints generatePointsIn(std::size_t t_nbPoints, std::size_t local_nbPoints, Rectangle const &t_area, int local_x);
 }
 
 #endif

@@ -231,19 +231,33 @@ InitializationData getConfig(std::ifstream &input)
 }
 
 // Retourne les classes initialisées à partir des informations d'initialisation dans initData
-void readConfig(InitializationData &initData, FullConfig &fullConfig)
+void readConfig(InitializationData &initData, int rank, int nbpCalc, FullConfig &fullConfig)
 {
     using point = Simulation::Vortices::point;
 
     fullConfig.cartesianGrid = Numeric::CartesianGridOfSpeed({initData.nx, initData.ny}, point{initData.xleft, initData.ybot}, initData.h);
 
+    int x_local = 0;
+    int nbPoints_local = initData.nbPoints;
+
+    if (rank != 0)
+    {
+        std::size_t sqrtNbPoints = std::size_t(std::sqrt(initData.nbPoints));
+        std::size_t nbPointsY = initData.nbPoints / sqrtNbPoints;
+        std::size_t nbPointsX = sqrtNbPoints + (initData.nbPoints % sqrtNbPoints > 0 ? 1 : 0);
+
+        x_local = (rank - 1) * (nbPointsX / nbpCalc);
+        nbPoints_local = nbPointsX * nbPointsY;
+    }
+
     if (initData.modeGeneration == 0) // Génération sur toute la grille
     {
-        fullConfig.cloud = Geometry::generatePointsIn(initData.nbPoints, {fullConfig.cartesianGrid.getLeftBottomVertex(), fullConfig.cartesianGrid.getRightTopVertex()});
+
+        fullConfig.cloud = Geometry::generatePointsIn(initData.nbPoints, nbPoints_local, {fullConfig.cartesianGrid.getLeftBottomVertex(), fullConfig.cartesianGrid.getRightTopVertex()}, x_local);
     }
     else
     {
-        fullConfig.cloud = Geometry::generatePointsIn(initData.nbPoints, {point{initData.xl, initData.yb}, point{initData.xr, initData.yt}});
+        fullConfig.cloud = Geometry::generatePointsIn(initData.nbPoints, nbPoints_local, {point{initData.xl, initData.yb}, point{initData.xr, initData.yt}}, x_local);
     }
 
     Simulation::Vortices vortices(initData.nbVortices, {fullConfig.cartesianGrid.getLeftBottomVertex(),
@@ -362,7 +376,7 @@ int main(int nargs, char *argv[])
     MPI_Bcast(initData.force, initData.nbVortices, MPI_DOUBLE, 1, globCom);
 
     // Création et initialisation des classes
-    readConfig(initData, fullConfig);
+    readConfig(initData, rank, nbp - 1, fullConfig);
     fullConfig.isMobile = initData.isMobile;
 
     /* --------------------------------------------------- Calcul et affichage de la simulation ---------------------------------------------------- */
