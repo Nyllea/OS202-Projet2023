@@ -1,6 +1,8 @@
 #include <iostream>
 #include "runge_kutta.hpp"
 #include "cartesian_grid_of_speed.hpp"
+#include <chrono>
+#include "omp.h"
 using namespace Geometry;
 
 Geometry::CloudOfPoints
@@ -12,6 +14,7 @@ Numeric::solve_RK4_fixed_vortices( double dt, CartesianGridOfSpeed const& t_velo
 
     Geometry::CloudOfPoints newCloud(t_points.numberOfPoints());
     // On ne bouge que les points :
+    #pragma omp parallel for
     for ( std::size_t iPoint=0; iPoint<t_points.numberOfPoints(); ++iPoint)
     {
         point  p = t_points[iPoint];
@@ -40,9 +43,14 @@ Numeric::solve_RK4_movable_vortices( double dt, CartesianGridOfSpeed& t_velocity
     using point  = Simulation::Vortices::point;
 
     Geometry::CloudOfPoints newCloud(t_points.numberOfPoints());
+
+    
+    //14 FPS avant et 40 FPS avec pragma parallel for
+    #pragma omp parallel for
+     
     // On ne bouge que les points :
     for ( std::size_t iPoint=0; iPoint<t_points.numberOfPoints(); ++iPoint)
-    {
+    {    
         point  p = t_points[iPoint];
         vector v1 = t_velocity.computeVelocityFor(p);
         point p1 = p + 0.5*dt*v1;
@@ -56,6 +64,8 @@ Numeric::solve_RK4_movable_vortices( double dt, CartesianGridOfSpeed& t_velocity
         vector v4 = t_velocity.computeVelocityFor(p3);
         newCloud[iPoint] = t_velocity.updatePosition(p + onesixth*dt*(v1+2.*v2+2.*v3+v4));
     }
+
+
     std::vector<point> newVortexCenter;
     newVortexCenter.reserve(t_vortices.numberOfVortices());
     for (std::size_t iVortex=0; iVortex<t_vortices.numberOfVortices(); ++iVortex)
@@ -73,12 +83,17 @@ Numeric::solve_RK4_movable_vortices( double dt, CartesianGridOfSpeed& t_velocity
         vector v4 = t_vortices.computeSpeed(p3);
         newVortexCenter.emplace_back(t_velocity.updatePosition(p + onesixth*dt*(v1+2.*v2+2.*v3+v4)));
     }
+
+
     for (std::size_t iVortex=0; iVortex<t_vortices.numberOfVortices(); ++iVortex)
     {
         t_vortices.setVortex(iVortex, newVortexCenter[iVortex], 
                              t_vortices.getIntensity(iVortex));
+    
     }
+    //150 FPS
     t_velocity.updateVelocityField(t_vortices);
+
     return newCloud;
 
 }

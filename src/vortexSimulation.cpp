@@ -130,6 +130,7 @@ int main( int nargs, char* argv[] )
     while (myScreen.isOpen())
     {
         auto start = std::chrono::system_clock::now();
+        // auto start = std::chrono::system_clock::now();
         bool advance = false;
         // on inspecte tous les évènements de la fenêtre qui ont été émis depuis la précédente itération
         sf::Event event;
@@ -153,13 +154,21 @@ int main( int nargs, char* argv[] )
         {
             if (isMobile)
             {
+                // auto start2 = std::chrono::system_clock::now();
                 cloud = Numeric::solve_RK4_movable_vortices(dt, grid, vortices, cloud);
+                // auto end = std::chrono::system_clock::now();
+                // std::chrono::duration<double> diff = end - start2;
+                // std::string str_fps_calcul = std::string("FPS Calcul : ") + std::to_string(1./diff.count());
+                // std::cout << str_fps_calcul << std::endl;
             }
             else
             {
                 cloud = Numeric::solve_RK4_fixed_vortices(dt, grid, cloud);
             }
         }
+
+       
+
         myScreen.clear(sf::Color::Black);
         std::string strDt = std::string("Time step : ") + std::to_string(dt);
         myScreen.drawText(strDt, Geometry::Point<double>{50, double(myScreen.getGeometry().second-96)});
