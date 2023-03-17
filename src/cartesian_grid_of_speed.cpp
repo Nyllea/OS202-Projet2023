@@ -21,7 +21,7 @@ CartesianGridOfSpeed::updateVelocityField( Simulation::Vortices const& t_vortice
     using point=Simulation::Vortices::point;
     double halfStep = 0.5*m_step;
 
-    //#pragma omp parallel for
+    #pragma omp parallel for
 
     for ( std::size_t iRow=0; iRow<m_height; ++iRow )
     {

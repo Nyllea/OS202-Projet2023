@@ -46,7 +46,7 @@ Numeric::solve_RK4_movable_vortices( double dt, CartesianGridOfSpeed& t_velocity
 
     
     //14 FPS avant et 40 FPS avec pragma parallel for
-    //#pragma omp parallel for
+    #pragma omp parallel for
      
     // On ne bouge que les points :
     for ( std::size_t iPoint=0; iPoint<t_points.numberOfPoints(); ++iPoint)
