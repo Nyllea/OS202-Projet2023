@@ -387,8 +387,6 @@ int main(int nargs, char *argv[])
     simCommand.advance = false;
     simCommand.endSimulation = false;
 
-    MPI_Request req;
-
     // On récupère la taille des données à transmettre
     int cloudPoint_DT_size, geomVect_DT_size;
     MPI_Type_size(cloudPoint_DT, &cloudPoint_DT_size);
@@ -404,6 +402,9 @@ int main(int nargs, char *argv[])
     double *gigaBuffer = NULL;
     if (fullConfig.isMobile)
         gigaBuffer = new double[allBufferSize];
+
+    MPI_Request req[3];
+    int nbReq = 0; // Nbr de requetes en cours
 
     // Processus graphique
     if (rank == 0)
@@ -423,6 +424,7 @@ int main(int nargs, char *argv[])
         for (int i = 1; i < nbp; i++)
         {
             displ[i] = displ[i - 1] + sizes[i - 1];
+            std::cout << sizes[i] << " : " << cloud_size_as_double << std::endl;
         }
 
         // Reception de la grille initale
@@ -465,9 +467,10 @@ int main(int nargs, char *argv[])
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right))
                     simCommand.advance = true;
             }
-
+            std::cout << "before bcast" << std::endl;
             // Broadcast/Envoie de advance, animate et dt (s'ils ont changé) au(x) processus de calcul (ie envoie d'un SimulationCommand)
             MPI_Bcast(&simCommand, 1, simulationCommands_DT, 0, globCom);
+            std::cout << "aftezr bcast" << std::endl;
 
             if (!simCommand.endSimulation)
             {
@@ -475,9 +478,21 @@ int main(int nargs, char *argv[])
                 if (fullConfig.isMobile)
                 {
                     // Réception des données (c'est la partie lente qui limite les FPS)
-                    MPI_Bcast(gigaBuffer, vortices_size, MPI_DOUBLE, 1, globCom);
-                    MPI_Recv(&gigaBuffer[vortices_size], grid_size_as_double, MPI_DOUBLE, 1, 5, globCom, MPI_STATUS_IGNORE);
-                    MPI_Gatherv(NULL, 0, MPI_DOUBLE, &gigaBuffer[vortices_size + grid_size_as_double], sizes, displ, MPI_DOUBLE, 0, globCom);
+                    std::cout << "before bcast" << std::endl;
+                    MPI_Ibcast(gigaBuffer, vortices_size, MPI_DOUBLE, 1, globCom, &req[0]);
+                    std::cout << "before recv" << std::endl;
+                    MPI_Irecv(&gigaBuffer[vortices_size], grid_size_as_double, MPI_DOUBLE, 1, 5, globCom, &req[1]);
+                    std::cout << "before gather" << std::endl;
+
+                    MPI_Igatherv(NULL, 0, MPI_DOUBLE, &gigaBuffer[vortices_size + grid_size_as_double], sizes, displ, MPI_DOUBLE, 0, globCom, &req[2]);
+
+                    nbReq = 3;
+
+                    std::cout << "after gather" << std::endl;
+
+                    MPI_Waitall(nbReq, req, MPI_STATUSES_IGNORE);
+
+                    std::cout << "after waitall graphique" << std::endl;
 
                     // Copie depuis le buffer dans la structure
                     std::copy(gigaBuffer, gigaBuffer + vortices_size, fullConfig.vortices.data());
@@ -486,7 +501,13 @@ int main(int nargs, char *argv[])
                 }
                 else
                 {
-                    MPI_Recv(fullConfig.cloud.data(), fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 1, 5, globCom, MPI_STATUS_IGNORE);
+                    std::cout << "before gathervast" << std::endl;
+                    MPI_Igatherv(NULL, 0, MPI_DOUBLE, fullConfig.cloud.data(), sizes, displ, MPI_DOUBLE, 0, globCom, &req[0]);
+                    std::cout << "after gathervast" << std::endl;
+
+                    nbReq = 1;
+
+                    MPI_Waitall(nbReq, &req[0], MPI_STATUSES_IGNORE);
                 }
 
                 // Mise à jour de la fenêtre
@@ -516,7 +537,10 @@ int main(int nargs, char *argv[])
 
         // Envoi asynchrone de la grille au processus graphique (Buffer inutile ici car on ne modifie pas cette donnée avant le prochain MPI_Wait)
         if (rank == 1)
-            MPI_Send(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.get_container_size(), geomVect_DT, 0, 101, globCom);
+        {
+            MPI_Isend(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.get_container_size(), geomVect_DT, 0, 101, globCom, &req[0]);
+            nbReq = 1;
+        }
         // MPI_Gatherv(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.get_container_size(), geomVect_DT, NULL, NULL, NULL, geomVect_DT, 0, globCom);
 
         // On crée le buffer permettant un envoie asynchrone des données
@@ -527,13 +551,17 @@ int main(int nargs, char *argv[])
         // Tant que la simulation est en cours
         while (!simCommand.endSimulation)
         {
+            std::cout << "before iggggggcast" << std::endl;
             // Récupération des commandes du processus graphique
             MPI_Bcast(&simCommand, 1, simulationCommands_DT, 0, globCom);
+            std::cout << "afyer ibcadq<dfqzrfst" << std::endl;
 
             if (!simCommand.endSimulation)
             {
+                std::cout << "before wait all" << std::endl;
                 // On s'assure que les données précédentes ont bien été envoyées et réceptionnées
-                // MPI_Wait(&req, MPI_STATUS_IGNORE);
+                MPI_Waitall(nbReq, req, MPI_STATUSES_IGNORE);
+                std::cout << "after wait all" << std::endl;
 
                 // Envoie asynchrone des données de la simulation au processus graphique: vortices, grid et cloud si isMobile, cloud sinon
                 // On utilise des buffer pour s'assurer de ne pas modifier les données pendant l'envoi
@@ -544,13 +572,19 @@ int main(int nargs, char *argv[])
                     std::copy(fullConfig.cartesianGrid.data(), fullConfig.cartesianGrid.data() + grid_size_as_double, &gigaBuffer[vortices_size]);
                     std::copy(fullConfig.cloud.data(), fullConfig.cloud.data() + cloud_size_as_double, &gigaBuffer[vortices_size + grid_size_as_double]);
 
+                    std::cout << "before ibcast" << std::endl;
+
                     // Envoie asynchrone
-                    MPI_Bcast(gigaBuffer, vortices_size, MPI_DOUBLE, 1, globCom);
+                    MPI_Ibcast(gigaBuffer, vortices_size, MPI_DOUBLE, 1, globCom, &req[0]);
+
+                    std::cout << "after ibcast" << std::endl;
 
                     if (rank == 1)
-                        MPI_Send(&gigaBuffer[vortices_size], grid_size_as_double, MPI_DOUBLE, 0, 5, globCom);
+                        MPI_Isend(&gigaBuffer[vortices_size], grid_size_as_double, MPI_DOUBLE, 0, 5, globCom, &req[2]);
 
-                    MPI_Gatherv(&gigaBuffer[vortices_size + grid_size_as_double], cloud_size_as_double, MPI_DOUBLE, NULL, NULL, NULL, MPI_DOUBLE, 0, globCom);
+                    MPI_Igatherv(&gigaBuffer[vortices_size + grid_size_as_double], cloud_size_as_double, MPI_DOUBLE, NULL, NULL, NULL, MPI_DOUBLE, 0, globCom, &req[1]);
+
+                    nbReq = rank == 1 ? 3 : 2;
                 }
                 else
                 {
@@ -558,7 +592,9 @@ int main(int nargs, char *argv[])
                     std::copy(fullConfig.cloud.data(), fullConfig.cloud.data() + cloud_size_as_double, cloud_buffer);
 
                     // Envoie asynchrone
-                    MPI_Isend(cloud_buffer, fullConfig.cloud.numberOfPoints(), cloudPoint_DT, 0, 5, globCom, &req);
+                    MPI_Igatherv(cloud_buffer, cloud_size_as_double, MPI_DOUBLE, NULL, NULL, NULL, MPI_DOUBLE, 0, globCom, &req[0]);
+
+                    nbReq = 1;
                 }
 
                 // Mesure de la vitesse de calcul
@@ -581,7 +617,7 @@ int main(int nargs, char *argv[])
 
                 std::chrono::duration<double> diff = end - start;
                 std::string str_fps = std::string("Calculations per second  : ") + std::to_string(1. / diff.count());
-                std::cout << str_fps << "\r";
+                std::cout << str_fps << "\n";
             }
         }
 
