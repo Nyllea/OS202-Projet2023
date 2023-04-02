@@ -16,6 +16,8 @@
 #include <mpi.h>
 #include "vector.hpp"
 
+#include <unistd.h>
+
 /* --------------------------------------Déclaration des structures nécessaires à la communication entre processus ----------------------------------------*/
 
 // Structure pour envoyer une configuration entière
@@ -50,6 +52,8 @@ struct InitializationData
     double xl, yb, xr, yt;
 
     double *x, *y, *force;
+
+    InitializationData() : x(NULL), y(NULL), force(NULL) {}
 };
 
 /* --------------------------------------------- Fonctions de création/suppression des Datatype MPI nécessaires -------------------------------------------- */
@@ -150,7 +154,7 @@ MPI_Datatype create_initializationData_datatype()
 }
 
 // Nettoie toutes les variables MPI et appelle MPI_Finalize()
-void StopMPI(
+inline void FreeMPI(
     MPI_Datatype *simulationCommands_DT, MPI_Datatype *initializationData_DT,
     MPI_Datatype *cloudPoint_DT,
     MPI_Datatype *geomVect_DT)
@@ -162,8 +166,6 @@ void StopMPI(
     MPI_Type_free(cloudPoint_DT);
 
     MPI_Type_free(geomVect_DT);
-
-    MPI_Finalize();
 }
 
 /* ------------------------------------------ Fonctions de récupération des données initiale de la configuration ---------------------------------- */
@@ -327,6 +329,7 @@ int main(int nargs, char *argv[])
         if (nargs == 1)
         {
             std::cout << "Usage : vortexsimulator <nom fichier configuration>" << std::endl;
+            std::cout << "Data not properly loaded" << std::endl;
 
             initData.dataLoaded = false;
         }
@@ -349,8 +352,6 @@ int main(int nargs, char *argv[])
     // Arrêt si les données n'ont pas été chargées
     if (!initData.dataLoaded)
     {
-        std::cout << "Data not properly loaded" << std::endl;
-
         if (initData.x != NULL)
             delete[] initData.x;
         if (initData.y != NULL)
@@ -358,7 +359,8 @@ int main(int nargs, char *argv[])
         if (initData.force != NULL)
             delete[] initData.force;
 
-        StopMPI(&simulationCommands_DT, &initializationData_DT, &cloudPoint_DT, &geomVect_DT);
+        FreeMPI(&simulationCommands_DT, &initializationData_DT, &cloudPoint_DT, &geomVect_DT);
+        MPI_Finalize();
 
         return EXIT_FAILURE;
     }
@@ -409,11 +411,13 @@ int main(int nargs, char *argv[])
     // Processus graphique
     if (rank == 0)
     {
+        // Calcul du nombre de point que chaque processus gère
         std::size_t sqrtNbPoints = std::size_t(std::sqrt(initData.nbPoints));
         std::size_t nbPointsY = initData.nbPoints / sqrtNbPoints;
         std::size_t nbPointsX = sqrtNbPoints + (initData.nbPoints % sqrtNbPoints > 0 ? 1 : 0);
         int nbPoints = nbPointsX * nbPointsY;
 
+        // Création des tableaux de taille et de décalage pour le gatherv
         int *sizes = new int[nbp];
         sizes[0] = 0;
         for (int i = 1; i < nbp; i++)
@@ -467,10 +471,10 @@ int main(int nargs, char *argv[])
                 if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right))
                     simCommand.advance = true;
             }
-            std::cout << "before bcast" << std::endl;
+            std::cout << "before graph bcast" << std::endl;
             // Broadcast/Envoie de advance, animate et dt (s'ils ont changé) au(x) processus de calcul (ie envoie d'un SimulationCommand)
             MPI_Bcast(&simCommand, 1, simulationCommands_DT, 0, globCom);
-            std::cout << "aftezr bcast" << std::endl;
+            std::cout << "after graph bcast" << std::endl;
 
             if (!simCommand.endSimulation)
             {
@@ -510,6 +514,7 @@ int main(int nargs, char *argv[])
                     MPI_Waitall(nbReq, &req[0], MPI_STATUSES_IGNORE);
                 }
 
+                std::cout << "Before window print" << std::endl;
                 // Mise à jour de la fenêtre
                 myScreen.clear(sf::Color::Black);
                 std::string strDt = std::string("Time step : ") + std::to_string(simCommand.dt);
@@ -521,9 +526,11 @@ int main(int nargs, char *argv[])
                 std::string str_fps = std::string("FPS : ") + std::to_string(1. / diff.count());
                 myScreen.drawText(str_fps, Geometry::Point<double>{300, double(myScreen.getGeometry().second - 96)});
                 myScreen.display();
+                std::cout << "After window print" << std::endl;
             }
         }
 
+        std::cout << "Before sizes free" << std::endl;
         if (sizes != NULL)
             delete[] sizes;
         if (displ != NULL)
@@ -551,17 +558,17 @@ int main(int nargs, char *argv[])
         // Tant que la simulation est en cours
         while (!simCommand.endSimulation)
         {
-            std::cout << "before iggggggcast" << std::endl;
+            std::cout << "before calcul broadcast" << std::endl;
             // Récupération des commandes du processus graphique
             MPI_Bcast(&simCommand, 1, simulationCommands_DT, 0, globCom);
-            std::cout << "afyer ibcadq<dfqzrfst" << std::endl;
+            std::cout << "after calcul broadcast" << std::endl;
 
             if (!simCommand.endSimulation)
             {
-                std::cout << "before wait all" << std::endl;
+                std::cout << "before calc wait all" << std::endl;
                 // On s'assure que les données précédentes ont bien été envoyées et réceptionnées
                 MPI_Waitall(nbReq, req, MPI_STATUSES_IGNORE);
-                std::cout << "after wait all" << std::endl;
+                std::cout << "after calc wait all" << std::endl;
 
                 // Envoie asynchrone des données de la simulation au processus graphique: vortices, grid et cloud si isMobile, cloud sinon
                 // On utilise des buffer pour s'assurer de ne pas modifier les données pendant l'envoi
@@ -620,7 +627,7 @@ int main(int nargs, char *argv[])
                 std::cout << str_fps << "\n";
             }
         }
-
+        std::cout << "Before cloud free" << std::endl;
         // Libération de la mémoire
         if (cloud_buffer != NULL)
             delete[] cloud_buffer;
@@ -637,7 +644,19 @@ int main(int nargs, char *argv[])
     if (initData.force != NULL)
         delete[] initData.force;
 
-    StopMPI(&simulationCommands_DT, &initializationData_DT, &cloudPoint_DT, &geomVect_DT);
+    std::cout << "Before MPI stop" << std::endl;
+
+    FreeMPI(&simulationCommands_DT, &initializationData_DT, &cloudPoint_DT, &geomVect_DT);
+
+    std::cout << "After MPI stop" << std::endl;
+
+    MPI_Finalize();
+
+    unsigned int microsecond = 1000000;
+    if (rank != 0)
+        usleep(3 * microsecond); // sleeps for 3 second
+
+    std::cout << "END on rank: " << rank << std::endl;
 
     return EXIT_SUCCESS;
 }
